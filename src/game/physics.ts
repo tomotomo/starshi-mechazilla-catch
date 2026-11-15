@@ -2,17 +2,12 @@ import {
   AERO_DAMP_COEFF,
   AREA_BASE,
   AREA_SIDE,
-  CATCH_MAX_OMEGA_DEG,
-  CATCH_MAX_THETA_DEG,
-  CATCH_MAX_VX,
-  CATCH_MAX_VY,
-  CATCH_TOLERANCE_X,
-  CATCH_TOLERANCE_Y,
   CD_COEFF,
   CL_COEFF,
   DRY_MASS,
   EXHAUST_VELOCITY,
   G0,
+  getAssistModeConfig,
   GIMBAL_RATE_RAD,
   GIMBAL_RETURN_RATE_RAD,
   GRIDFIN_TORQUE_COEFF,
@@ -30,7 +25,9 @@ import {
   TOWER_TOP_Y,
   UNIT_THRUST,
 } from './constants';
+import { formatOutcomeReason, type Locale } from './i18n';
 import type {
+  AssistMode,
   ControlInput,
   OutcomeKind,
   RocketState,
@@ -92,7 +89,17 @@ export function getNosePosition(state: Pick<RocketState, 'x' | 'y' | 'theta'>): 
   };
 }
 
-export function createInitialRocketState(stage: StageConfig): RocketState {
+export function getEffectiveInitialFuelKg(
+  stage: StageConfig,
+  assistMode: AssistMode = 'realistic'
+): number {
+  return Math.round(stage.initialFuelKg * getAssistModeConfig(assistMode).fuelFactor);
+}
+
+export function createInitialRocketState(
+  stage: StageConfig,
+  assistMode: AssistMode = 'realistic'
+): RocketState {
   const state: RocketState = {
     x: stage.initialX,
     y: stage.initialY,
@@ -101,7 +108,7 @@ export function createInitialRocketState(stage: StageConfig): RocketState {
     theta: degToRad(stage.initialThetaDeg),
     omega: 0,
     gimbal: 0,
-    fuelMass: stage.initialFuelKg,
+    fuelMass: getEffectiveInitialFuelKg(stage, assistMode),
     selectedEngines: 3,
     throttleOn: false,
     activeEngines: 0,
@@ -111,31 +118,56 @@ export function createInitialRocketState(stage: StageConfig): RocketState {
     gForce: 0,
     dynamicPressureKpa: 0,
     hoverslamStopPinY: null,
+    hoverslamCanStop: true,
+    hoverslamStopPinY3: null,
+    hoverslam3CanStop: true,
   };
-  state.hoverslamStopPinY = estimateHoverslamStopPinY(state, 3);
+  const predCurrent = estimateHoverslamPrediction(state, state.selectedEngines);
+  const pred3 = estimateHoverslamPrediction(state, 3);
+  state.hoverslamStopPinY = predCurrent.stopPinY;
+  state.hoverslamCanStop = predCurrent.canStop;
+  state.hoverslamStopPinY3 = pred3.stopPinY;
+  state.hoverslam3CanStop = pred3.canStop;
   return state;
+}
+
+export interface HoverslamPrediction {
+  stopPinY: number | null;
+  canStop: boolean;
 }
 
 /**
  * Estimates the catch-pin Y altitude where vertical velocity would reach 0
  * if burning `engineCount` engines upright from the current state.
- * Used as a HUD reference indicator for Suicide Burn / Hoverslam timing.
+ * Also flags `canStop = false` when net deceleration <= 0 or fuel is depleted.
  */
-export function estimateHoverslamStopPinY(
+export function estimateHoverslamPrediction(
   state: Pick<RocketState, 'y' | 'theta' | 'vy' | 'fuelMass'>,
   engineCount: 1 | 2 | 3 | 6 = 3
-): number | null {
-  if (state.vy >= -0.5 || state.fuelMass <= 0) {
-    return null;
+): HoverslamPrediction {
+  if (state.vy >= -0.5) {
+    return { stopPinY: null, canStop: true };
+  }
+  if (state.fuelMass <= 0) {
+    return { stopPinY: null, canStop: false };
   }
   const totalMass = DRY_MASS + state.fuelMass;
   const thrustAcc = (engineCount * UNIT_THRUST) / totalMass;
   const netDecel = thrustAcc - G0;
-  if (netDecel <= 0.1) return null;
+  if (netDecel <= 0.05) {
+    return { stopPinY: null, canStop: false };
+  }
 
   const stopDist = (state.vy * state.vy) / (2 * netDecel);
   const pinY = state.y + R_CATCH_PIN * Math.cos(state.theta);
-  return pinY - stopDist;
+  return { stopPinY: pinY - stopDist, canStop: true };
+}
+
+export function estimateHoverslamStopPinY(
+  state: Pick<RocketState, 'y' | 'theta' | 'vy' | 'fuelMass'>,
+  engineCount: 1 | 2 | 3 | 6 = 3
+): number | null {
+  return estimateHoverslamPrediction(state, engineCount).stopPinY;
 }
 
 /**
@@ -286,14 +318,56 @@ export function stepRocketPhysics(
     gForce: feltG,
     dynamicPressureKpa: dynamicPressurePa / 1000,
     hoverslamStopPinY: null,
+    hoverslamCanStop: true,
+    hoverslamStopPinY3: null,
+    hoverslam3CanStop: true,
   };
 
-  nextState.hoverslamStopPinY = estimateHoverslamStopPinY(
-    nextState,
-    prev.selectedEngines
-  );
+  const predCurrent = estimateHoverslamPrediction(nextState, prev.selectedEngines);
+  const pred3 = estimateHoverslamPrediction(nextState, 3);
+  nextState.hoverslamStopPinY = predCurrent.stopPinY;
+  nextState.hoverslamCanStop = predCurrent.canStop;
+  nextState.hoverslamStopPinY3 = pred3.stopPinY;
+  nextState.hoverslam3CanStop = pred3.canStop;
 
   return nextState;
+}
+
+/**
+ * Interpolates kinematic state between two consecutive fixed-timestep physics
+ * states so high-speed flight (e.g. 1,500 m/s in LEO) renders smoothly across
+ * variable rAF intervals and 60Hz/120Hz/144Hz displays without step-aliasing jitter.
+ */
+export function interpolateRocketState(
+  prev: RocketState,
+  curr: RocketState,
+  alpha: number
+): RocketState {
+  const t = Math.max(0, Math.min(1, alpha));
+  if (t <= 0) return prev;
+  if (t >= 1) return curr;
+
+  const lerp = (a: number, b: number) => a + (b - a) * t;
+  const thetaDiff = normalizeAngle(curr.theta - prev.theta);
+
+  return {
+    ...curr,
+    x: lerp(prev.x, curr.x),
+    y: lerp(prev.y, curr.y),
+    vx: lerp(prev.vx, curr.vx),
+    vy: lerp(prev.vy, curr.vy),
+    theta: normalizeAngle(prev.theta + thetaDiff * t),
+    gimbal: lerp(prev.gimbal, curr.gimbal),
+    dynamicPressureKpa: lerp(prev.dynamicPressureKpa, curr.dynamicPressureKpa),
+    hoverslamStopPinY:
+      prev.hoverslamStopPinY !== null && curr.hoverslamStopPinY !== null
+        ? lerp(prev.hoverslamStopPinY, curr.hoverslamStopPinY)
+        : curr.hoverslamStopPinY,
+    hoverslamStopPinY3:
+      prev.hoverslamStopPinY3 !== null && curr.hoverslamStopPinY3 !== null
+        ? lerp(prev.hoverslamStopPinY3, curr.hoverslamStopPinY3)
+        : curr.hoverslamStopPinY3,
+  };
 }
 
 export interface CollisionCheckResult {
@@ -305,7 +379,12 @@ export interface CollisionCheckResult {
   impactSpeed: number;
 }
 
-export function evaluateOutcome(state: RocketState): CollisionCheckResult {
+export function evaluateOutcome(
+  state: RocketState,
+  assistMode: AssistMode = 'realistic',
+  locale: Locale = 'ja'
+): CollisionCheckResult {
+  const cfg = getAssistModeConfig(assistMode);
   const pin = getCatchPinPosition(state);
   const bot = getBottomPosition(state);
   const nose = getNosePosition(state);
@@ -314,20 +393,28 @@ export function evaluateOutcome(state: RocketState): CollisionCheckResult {
   const omegaDeg = Math.abs(radToDeg(state.omega));
 
   // 1. Check Catch Zone conditions first when pin is inside chopstick envelope
-  const inCatchX = Math.abs(pin.x) <= CATCH_TOLERANCE_X;
-  const inCatchY = Math.abs(pin.y) <= CATCH_TOLERANCE_Y;
+  const inCatchX = Math.abs(pin.x) <= cfg.catchToleranceX;
+  const inCatchY = Math.abs(pin.y) <= cfg.catchToleranceY;
 
   if (inCatchX && inCatchY) {
     const velOk =
-      Math.abs(state.vy) <= CATCH_MAX_VY && Math.abs(state.vx) <= CATCH_MAX_VX;
+      Math.abs(state.vy) <= cfg.catchMaxVy && Math.abs(state.vx) <= cfg.catchMaxVx;
     const attitudeOk =
-      pitchDeg <= CATCH_MAX_THETA_DEG && omegaDeg <= CATCH_MAX_OMEGA_DEG;
+      pitchDeg <= cfg.catchMaxThetaDeg && omegaDeg <= cfg.catchMaxOmegaDeg;
 
     if (velOk && attitudeOk) {
       return {
         terminated: true,
         outcome: 'CATCH_SUCCESS',
-        reason: 'Mechazilla Chopstick Catch Confirmed',
+        reason: formatOutcomeReason('CATCH_SUCCESS', locale, {
+          vx: state.vx,
+          vy: state.vy,
+          pitchDeg,
+          maxShipX: state.x,
+          shipY: state.y,
+          speed,
+          pinX: pin.x,
+        }),
         pinDeltaX: pin.x,
         pinDeltaY: pin.y,
         impactSpeed: speed,
@@ -336,14 +423,24 @@ export function evaluateOutcome(state: RocketState): CollisionCheckResult {
 
     // Arm collision if descending past center at unsafe speed or severely tilted inside arm gap
     const unsafeSpeedPass = pin.y <= 0 && Math.abs(state.vy) > 18;
-    const unsafeTiltInsideArms = pitchDeg > 18 && pin.y <= 2.5;
-    const fallingOutBottom = pin.y <= -3.4 && state.vy < -CATCH_MAX_VY;
+    const unsafeTiltInsideArms =
+      pitchDeg > Math.max(18, cfg.catchMaxThetaDeg + 6) && pin.y <= 2.5;
+    const fallingOutBottom =
+      pin.y <= -(cfg.catchToleranceY - 0.6) && state.vy < -cfg.catchMaxVy;
 
     if (unsafeSpeedPass || unsafeTiltInsideArms || fallingOutBottom) {
       return {
         terminated: true,
         outcome: 'RUD_CATCH_FAIL',
-        reason: `Catch Arm Impact: |vx|=${Math.abs(state.vx).toFixed(1)} m/s, |vy|=${Math.abs(state.vy).toFixed(1)} m/s, Pitch=${pitchDeg.toFixed(1)}°`,
+        reason: formatOutcomeReason('RUD_CATCH_FAIL', locale, {
+          vx: state.vx,
+          vy: state.vy,
+          pitchDeg,
+          maxShipX: state.x,
+          shipY: state.y,
+          speed,
+          pinX: pin.x,
+        }),
         pinDeltaX: pin.x,
         pinDeltaY: pin.y,
         impactSpeed: speed,
@@ -368,7 +465,15 @@ export function evaluateOutcome(state: RocketState): CollisionCheckResult {
     return {
       terminated: true,
       outcome: 'RUD_TOWER',
-      reason: `Launch Tower Collision at x=${maxShipX.toFixed(1)}m, y=${state.y.toFixed(1)}m (${speed.toFixed(1)} m/s)`,
+      reason: formatOutcomeReason('RUD_TOWER', locale, {
+        vx: state.vx,
+        vy: state.vy,
+        pitchDeg: radToDeg(state.theta),
+        maxShipX,
+        shipY: state.y,
+        speed,
+        pinX: pin.x,
+      }),
       pinDeltaX: pin.x,
       pinDeltaY: pin.y,
       impactSpeed: speed,
@@ -380,7 +485,15 @@ export function evaluateOutcome(state: RocketState): CollisionCheckResult {
     return {
       terminated: true,
       outcome: 'RUD_GROUND',
-      reason: `Ground Pad Impact at ${speed.toFixed(1)} m/s (Δx=${pin.x.toFixed(1)}m, Pitch=${radToDeg(state.theta).toFixed(1)}°)`,
+      reason: formatOutcomeReason('RUD_GROUND', locale, {
+        vx: state.vx,
+        vy: state.vy,
+        pitchDeg: radToDeg(state.theta),
+        maxShipX,
+        shipY: state.y,
+        speed,
+        pinX: pin.x,
+      }),
       pinDeltaX: pin.x,
       pinDeltaY: pin.y,
       impactSpeed: speed,
@@ -399,32 +512,39 @@ export function evaluateOutcome(state: RocketState): CollisionCheckResult {
 
 export function calculateScore(
   state: RocketState,
-  stage: StageConfig
+  stage: StageConfig,
+  assistMode: AssistMode = 'realistic'
 ): ScoreBreakdown {
+  const cfg = getAssistModeConfig(assistMode);
+  const initialFuelKg = getEffectiveInitialFuelKg(stage, assistMode);
+
   const pin = getCatchPinPosition(state);
   const distanceErrorM = Math.hypot(pin.x, pin.y);
-  const dMax = Math.hypot(CATCH_TOLERANCE_X, CATCH_TOLERANCE_Y); // ~5.65685m
+  const dMax = Math.hypot(cfg.catchToleranceX, cfg.catchToleranceY);
   const positionScore = Math.max(
     0,
     3000 * Math.pow(Math.max(0, 1 - distanceErrorM / dMax), 2)
   );
 
   const catchSpeedMs = Math.hypot(state.vx, state.vy);
-  const vMax = Math.hypot(CATCH_MAX_VX, CATCH_MAX_VY); // ~2.9155m/s
+  const vMax = Math.hypot(cfg.catchMaxVx, cfg.catchMaxVy);
   const pitchErrorDeg = Math.abs(radToDeg(state.theta));
 
   const velComponent =
     3000 * Math.pow(Math.max(0, 1 - catchSpeedMs / vMax), 2);
   const attitudeComponent =
-    1000 * Math.max(0, 1 - pitchErrorDeg / CATCH_MAX_THETA_DEG);
+    1000 * Math.max(0, 1 - pitchErrorDeg / cfg.catchMaxThetaDeg);
   const velocityScore = velComponent + attitudeComponent;
 
   const remainingFuelRatio =
-    stage.initialFuelKg > 0 ? state.fuelMass / stage.initialFuelKg : 0;
-  const fuelScore = Math.min(3000, 3000 * (remainingFuelRatio / 0.08));
+    initialFuelKg > 0 ? state.fuelMass / initialFuelKg : 0;
+  const fuelScore = Math.min(
+    3000,
+    3000 * (remainingFuelRatio / cfg.fuelFullScoreRatio)
+  );
 
   const baseScore = positionScore + velocityScore + fuelScore;
-  const totalScore = Math.round(baseScore * stage.multiplier);
+  const totalScore = Math.round(baseScore * stage.multiplier * cfg.modeMultiplier);
 
   return {
     positionScore: Math.round(positionScore),
@@ -432,6 +552,7 @@ export function calculateScore(
     fuelScore: Math.round(fuelScore),
     baseScore: Math.round(baseScore),
     multiplier: stage.multiplier,
+    modeMultiplier: cfg.modeMultiplier,
     totalScore,
     distanceErrorM,
     catchSpeedMs,
@@ -442,8 +563,10 @@ export function calculateScore(
 
 export function toTelemetryFrame(
   state: RocketState,
-  stage: StageConfig
+  stage: StageConfig,
+  assistMode: AssistMode = 'realistic'
 ): TelemetryFrame {
+  const initialFuelKg = getEffectiveInitialFuelKg(stage, assistMode);
   const pin = getCatchPinPosition(state);
   const speed = Math.hypot(state.vx, state.vy);
   return {
@@ -457,10 +580,7 @@ export function toTelemetryFrame(
     gimbalDeg: radToDeg(state.gimbal),
     activeEngines: state.activeEngines,
     fuelMass: state.fuelMass,
-    fuelPct:
-      stage.initialFuelKg > 0
-        ? (state.fuelMass / stage.initialFuelKg) * 100
-        : 0,
+    fuelPct: initialFuelKg > 0 ? (state.fuelMass / initialFuelKg) * 100 : 0,
     gForce: state.gForce,
     dynamicPress: state.dynamicPressureKpa,
   };

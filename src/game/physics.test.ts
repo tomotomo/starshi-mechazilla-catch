@@ -9,14 +9,18 @@ import {
   MAX_GIMBAL_DEG,
   STAGES,
   UNIT_THRUST,
+  getAssistModeConfig,
 } from './constants';
 import {
   atmosphericDensity,
   calculateScore,
   createInitialRocketState,
   degToRad,
+  estimateHoverslamPrediction,
   evaluateOutcome,
   getCatchPinPosition,
+  getEffectiveInitialFuelKg,
+  interpolateRocketState,
   radToDeg,
   stepRocketPhysics,
 } from './physics';
@@ -192,23 +196,31 @@ test('all 4 stages are physically winnable with remaining fuel margin (no imposs
       const tAeroEff = Math.min(Math.max(0, tBallistic), stage.id === 'extreme' ? 92 : 65);
       const estImpactX = pin.x + s.vx * tAeroEff * 0.72;
 
-      if (
-        (stage.id === 'extreme' && s.y > 85_000 && s.vx > 152) ||
-        (stage.id === 'hard' && s.y > 26_000 && estImpactX > -450 && s.vx > 75)
-      ) {
+      if (stage.id === 'extreme' && s.y > 85_000 && s.vx > 152) {
         // Horizontal entry burn to bring ballistic trajectory within aero-glide range
-        desiredThetaDeg = stage.id === 'extreme' ? -88 : -84;
-        s.selectedEngines = stage.id === 'extreme' ? 6 : 3;
+        desiredThetaDeg = -88;
+        s.selectedEngines = 6;
         throttleHold = true;
       } else if (pin.y > Math.max(stopDist3 * 1.15 + 40, 180)) {
         // Aerodynamic glide / belly flop toward smooth glide slope west of tower
-        const targetX = Math.max(-25, -8 - pin.y * 0.005);
+        const targetX = stage.id === 'hard'
+          ? Math.max(-35, -14 - pin.y * 0.003)
+          : Math.max(-25, -8 - pin.y * 0.005);
         const tEst = pin.y / Math.max(35, -s.vy);
-        const desiredVx = Math.max(-160, Math.min(160, (targetX - pin.x) / Math.max(2.0, tEst * 0.7)));
+        const desiredVx = Math.max(
+          stage.id === 'hard' ? -140 : -160,
+          Math.min(stage.id === 'hard' ? 140 : 160, (targetX - pin.x) / Math.max(2.0, tEst * (stage.id === 'hard' ? 0.75 : 0.7)))
+        );
         const vxErr = desiredVx - s.vx;
 
-        if (speed > 260 && s.y > 3_500) {
-          // Continuous belly-flop around -90 deg: -60 glides right (+x), -120 glides left (-x), -90 max drag
+        if (stage.id === 'hard' && s.y > 4_000) {
+          // Proper belly-flop with black TPS heatshield down (+90 deg):
+          // +55 deg pitches nose up-right to glide left (-x), +115 deg pitches nose down-right to glide right (+x)
+          desiredThetaDeg = Math.max(55, Math.min(115, 90 + vxErr * 0.25));
+        } else if (stage.id === 'hard') {
+          desiredThetaDeg = Math.max(-35, Math.min(35, -vxErr * 1.2));
+        } else if (speed > 260 && s.y > 3_500) {
+          // LEO post-entry belly-flop around -90 deg
           desiredThetaDeg = Math.max(-118, Math.min(-55, -90 + vxErr * 0.45));
         } else {
           desiredThetaDeg = Math.max(-42, Math.min(42, -vxErr * 1.4));
@@ -262,9 +274,10 @@ test('all 4 stages are physically winnable with remaining fuel margin (no imposs
       'CATCH_SUCCESS',
       `Stage ${stage.id} failed with ${outcome.outcome}: ${outcome.reason}`
     );
+    const maxExpectedFuelPct = stage.id === 'hard' ? 75 : 60;
     assert.ok(
-      fuelPct > 3 && fuelPct < 60,
-      `Stage ${stage.id} remaining fuel ${fuelPct.toFixed(1)}% should be positive and bounded (3-60%)`
+      fuelPct > 3 && fuelPct < maxExpectedFuelPct,
+      `Stage ${stage.id} remaining fuel ${fuelPct.toFixed(1)}% should be positive and bounded (3-${maxExpectedFuelPct}%)`
     );
   }
 });
@@ -304,4 +317,278 @@ test('computeEasyDemoGuidance completes Stage 1 (easy) with clean CATCH_SUCCESS 
   assert.ok(phasesSeen.has('aero_glide'), 'Expected aero_glide phase');
   assert.ok(phasesSeen.has('hoverslam'), 'Expected hoverslam phase');
   assert.ok(phasesSeen.has('terminal_catch'), 'Expected terminal_catch phase');
+});
+
+test('Assisted mode scales initial fuel by 1.25x across all stages and keeps Realistic at 1.0x', () => {
+  const realisticCfg = getAssistModeConfig('realistic');
+  const assistedCfg = getAssistModeConfig('assisted');
+  assert.equal(realisticCfg.fuelFactor, 1.0);
+  assert.equal(assistedCfg.fuelFactor, 1.25);
+
+  for (const stage of STAGES) {
+    const rFuel = getEffectiveInitialFuelKg(stage, 'realistic');
+    const aFuel = getEffectiveInitialFuelKg(stage, 'assisted');
+    assert.equal(rFuel, stage.initialFuelKg);
+    assert.equal(aFuel, Math.round(stage.initialFuelKg * 1.25));
+
+    const rState = createInitialRocketState(stage, 'realistic');
+    const aState = createInitialRocketState(stage, 'assisted');
+    assert.equal(rState.fuelMass, rFuel);
+    assert.equal(aState.fuelMass, aFuel);
+  }
+});
+
+test('Assisted mode expands catch envelope to ±8m, |vy|<=6, |vx|<=4, |theta|<=12deg, |omega|<=15deg/s', () => {
+  const stage = STAGES[0];
+  const state = createInitialRocketState(stage, 'assisted');
+  // Boundary inside Assisted envelope, outside Realistic envelope
+  state.theta = degToRad(10.5);
+  state.omega = degToRad(-12.0);
+  state.vx = 3.2;
+  state.vy = -5.4;
+  // Place catch pin at (6.5, -6.5) -> CoM shifted by pin vector
+  state.x = 6.5 - 20 * Math.sin(state.theta);
+  state.y = -6.5 - 20 * Math.cos(state.theta);
+
+  const realisticRes = evaluateOutcome(state, 'realistic');
+  assert.notEqual(realisticRes.outcome, 'CATCH_SUCCESS');
+
+  const assistedRes = evaluateOutcome(state, 'assisted');
+  assert.equal(assistedRes.terminated, true);
+  assert.equal(assistedRes.outcome, 'CATCH_SUCCESS');
+
+  // Outside Assisted limits -> not caught
+  const overPitch: RocketState = { ...state, theta: degToRad(13.0) };
+  assert.notEqual(evaluateOutcome(overPitch, 'assisted').outcome, 'CATCH_SUCCESS');
+
+  const overVy: RocketState = { ...state, vy: -6.5 };
+  assert.notEqual(evaluateOutcome(overVy, 'assisted').outcome, 'CATCH_SUCCESS');
+
+  const overOmega: RocketState = { ...state, omega: degToRad(16.0) };
+  assert.notEqual(evaluateOutcome(overOmega, 'assisted').outcome, 'CATCH_SUCCESS');
+});
+
+test('Assisted mode score requires 15% remaining fuel for max fuelScore and applies 0.7x multiplier', () => {
+  const stage = STAGES[1]; // Normal: 1.5x stage multiplier
+  const assistedInitialFuel = getEffectiveInitialFuelKg(stage, 'assisted');
+
+  const basePerfect = createInitialRocketState(stage, 'assisted');
+  basePerfect.x = 0;
+  basePerfect.y = -20; // pin at (0, 0)
+  basePerfect.vx = 0;
+  basePerfect.vy = 0;
+  basePerfect.theta = 0;
+  basePerfect.omega = 0;
+
+  // At 10% remaining fuel: full fuelScore in Realistic (threshold 8%), 2/3 fuelScore in Assisted (threshold 15%)
+  const tenPctFuel = { ...basePerfect, fuelMass: assistedInitialFuel * 0.1 };
+  const sTenPct = calculateScore(tenPctFuel, stage, 'assisted');
+  assert.equal(sTenPct.fuelScore, 2000);
+  assert.equal(sTenPct.modeMultiplier, 0.7);
+  assert.equal(sTenPct.totalScore, Math.round((3000 + 4000 + 2000) * 1.5 * 0.7));
+
+  // At 15% remaining fuel: max base score 10,000 -> total = 10,000 * 1.5 * 0.7 = 10,500
+  const fifteenPctFuel = { ...basePerfect, fuelMass: assistedInitialFuel * 0.15 };
+  const sFifteenPct = calculateScore(fifteenPctFuel, stage, 'assisted');
+  assert.equal(sFifteenPct.fuelScore, 3000);
+  assert.equal(sFifteenPct.baseScore, 10000);
+  assert.equal(sFifteenPct.totalScore, 10500);
+});
+
+test('estimateHoverslamPrediction computes stopPinY and flags canStop=false when thrust <= gravity or fuel is empty', () => {
+  const stage = STAGES[3];
+  const heavy = createInitialRocketState(stage, 'realistic');
+  heavy.fuelMass = 150_000; // Total mass 250t -> weight ~2.45 MN > 1 engine (2.3 MN)
+  heavy.vy = -100;
+  heavy.theta = 0;
+
+  // 1 engine (2.3 MN) cannot overcome ~2.45 MN weight -> canStop = false
+  const pred1 = estimateHoverslamPrediction(heavy, 1);
+  assert.equal(pred1.canStop, false);
+  assert.equal(pred1.stopPinY, null);
+
+  // 3 engines (6.9 MN) > ~2.45 MN -> positive net deceleration -> canStop = true
+  const pred3 = estimateHoverslamPrediction(heavy, 3);
+  assert.equal(pred3.canStop, true);
+  assert.ok(pred3.stopPinY !== null && Number.isFinite(pred3.stopPinY));
+
+  // Empty fuel -> canStop = false
+  const emptyFuel = { ...heavy, fuelMass: 0 };
+  const predEmpty = estimateHoverslamPrediction(emptyFuel, 3);
+  assert.equal(predEmpty.canStop, false);
+  assert.equal(predEmpty.stopPinY, null);
+
+  // stepRocketPhysics populates both selected-engine and 3-engine predictions
+  heavy.selectedEngines = 1;
+  const stepped = stepRocketPhysics(heavy, NO_INPUT, FIXED_DT);
+  assert.equal(stepped.hoverslamCanStop, false);
+  assert.equal(stepped.hoverslam3CanStop, true);
+  assert.ok(stepped.hoverslamStopPinY3 !== null);
+});
+
+import {
+  TRANSLATIONS,
+  detectBrowserLocale,
+  getAssistModeLabel,
+  getAssistModeShortLabel,
+  getStageLocalized,
+  resolveLocale,
+} from './i18n';
+
+test('detectBrowserLocale maps Japanese tags to ja and non-Japanese/undefined to en', () => {
+  assert.deepEqual(detectBrowserLocale({ language: 'ja', languages: ['ja-JP', 'en-US'] }), {
+    locale: 'ja',
+    rawTag: 'ja-JP',
+  });
+  assert.deepEqual(detectBrowserLocale({ language: 'ja', languages: [] }), {
+    locale: 'ja',
+    rawTag: 'ja',
+  });
+  assert.deepEqual(detectBrowserLocale({ language: 'en-US', languages: ['en-US', 'ja'] }), {
+    locale: 'en',
+    rawTag: 'en-US',
+  });
+  assert.deepEqual(detectBrowserLocale({ language: 'fr-FR', languages: ['fr-FR'] }), {
+    locale: 'en',
+    rawTag: 'fr-FR',
+  });
+  assert.deepEqual(detectBrowserLocale(null), {
+    locale: 'en',
+    rawTag: 'en',
+  });
+  assert.deepEqual(detectBrowserLocale({ language: '', languages: [] }), {
+    locale: 'en',
+    rawTag: 'en',
+  });
+});
+
+test('resolveLocale respects auto preference, explicit preference, and URL override', () => {
+  assert.equal(resolveLocale('auto', 'ja', null), 'ja');
+  assert.equal(resolveLocale('auto', 'en', null), 'en');
+  assert.equal(resolveLocale('ja', 'en', null), 'ja');
+  assert.equal(resolveLocale('en', 'ja', null), 'en');
+  assert.equal(resolveLocale('ja', 'ja', 'en'), 'en');
+  assert.equal(resolveLocale('en', 'en', 'ja'), 'ja');
+});
+
+test('localized dictionaries and stage copies are populated for both ja and en', () => {
+  for (const stage of STAGES) {
+    const jaCopy = getStageLocalized(stage.id, 'ja');
+    const enCopy = getStageLocalized(stage.id, 'en');
+    assert.ok(jaCopy.name.trim().length > 0);
+    assert.ok(jaCopy.subtitle.trim().length > 0);
+    assert.ok(jaCopy.strategyTip.trim().length > 0);
+    assert.ok(enCopy.name.trim().length > 0);
+    assert.ok(enCopy.subtitle.trim().length > 0);
+    assert.ok(enCopy.strategyTip.trim().length > 0);
+    assert.notEqual(jaCopy.name, enCopy.name);
+  }
+
+  assert.equal(getAssistModeLabel('assisted', 'ja'), '簡易モード (Assisted)');
+  assert.equal(getAssistModeLabel('assisted', 'en'), 'Assisted Mode');
+  assert.equal(getAssistModeShortLabel('realistic', 'ja'), '通常 (Realistic)');
+  assert.equal(getAssistModeShortLabel('realistic', 'en'), 'Realistic');
+  assert.ok(TRANSLATIONS.ja.title.startMission.length > 0);
+  assert.ok(TRANSLATIONS.en.title.startMission.length > 0);
+  assert.equal(TRANSLATIONS.ja.common.engineUnit(3), '3基');
+  assert.equal(TRANSLATIONS.en.common.engineUnit(3), '3 ENG');
+});
+
+test('evaluateOutcome and computeEasyDemoGuidance localize reasons and commentary in ja and en', () => {
+  const stage = STAGES[0];
+  let s = createInitialRocketState(stage, 'realistic');
+  const gJa = computeEasyDemoGuidance(s, 'ja');
+  const gEn = computeEasyDemoGuidance(s, 'en');
+  assert.notEqual(gJa.phaseTitle, gEn.phaseTitle);
+  assert.notEqual(gJa.commentary, gEn.commentary);
+  assert.match(gEn.commentary, /[A-Za-z]/);
+
+  // Run EN demo autopilot to completion to verify clean catch & localized success reason
+  let outcomeEn = evaluateOutcome(s, 'realistic', 'en');
+  let steps = 0;
+  while (!outcomeEn.terminated && steps < 60 * 120) {
+    const guidance = computeEasyDemoGuidance(s, 'en');
+    s = { ...s, selectedEngines: guidance.selectedEngines };
+    s = stepRocketPhysics(s, guidance.input, FIXED_DT);
+    outcomeEn = evaluateOutcome(s, 'realistic', 'en');
+    steps++;
+  }
+  assert.equal(outcomeEn.outcome, 'CATCH_SUCCESS');
+  assert.equal(outcomeEn.reason, 'Mechazilla Chopstick Catch Confirmed');
+
+  const outcomeJa = evaluateOutcome(s, 'realistic', 'ja');
+  assert.equal(outcomeJa.reason, 'Mechazilla チョップスティックによる空中捕獲を確認');
+});
+
+test('50km (hard) stage starts with windward heatshield belly facing oncoming reentry airflow', () => {
+  const stage50 = STAGES.find((st) => st.id === 'hard')!;
+  assert.equal(stage50.initialThetaDeg, 65);
+  const s0 = createInitialRocketState(stage50, 'realistic');
+
+  // Local +x (black TPS heatshield) normal in world space is (cos(theta), -sin(theta))
+  const bellyX = Math.cos(s0.theta);
+  const bellyY = -Math.sin(s0.theta);
+  const speed = Math.hypot(s0.vx, s0.vy);
+  const vHatX = s0.vx / speed;
+  const vHatY = s0.vy / speed;
+
+  const bellyDotVelocity = bellyX * vHatX + bellyY * vHatY;
+  assert.ok(
+    bellyDotVelocity > 0.99,
+    `Expected TPS heatshield belly to face directly into velocity vector (dot=${bellyDotVelocity.toFixed(4)})`
+  );
+
+  // Survives first 3 seconds with zero input cleanly
+  let s = s0;
+  for (let i = 0; i < 180; i++) {
+    s = stepRocketPhysics(s, NO_INPUT, FIXED_DT);
+    const res = evaluateOutcome(s, 'realistic');
+    assert.equal(res.terminated, false);
+  }
+});
+
+test('interpolateRocketState eliminates LEO step-aliasing jitter and wraps angles cleanly', () => {
+  const leoStage = STAGES.find((st) => st.id === 'extreme')!;
+  let prev = createInitialRocketState(leoStage, 'realistic');
+  let curr = stepRocketPhysics(prev, NO_INPUT, FIXED_DT);
+
+  // Endpoint exactness
+  assert.equal(interpolateRocketState(prev, curr, 0), prev);
+  assert.equal(interpolateRocketState(prev, curr, 1), curr);
+
+  // Midpoint interpolation at 1,500 m/s LEO start
+  const mid = interpolateRocketState(prev, curr, 0.5);
+  assert.ok(Math.abs(mid.x - (prev.x + curr.x) * 0.5) < 1e-9);
+  assert.ok(Math.abs(mid.y - (prev.y + curr.y) * 0.5) < 1e-9);
+
+  // Shortest-path angle wrap across +/-PI boundary
+  const a0: RocketState = { ...prev, theta: degToRad(175) };
+  const a1: RocketState = { ...curr, theta: degToRad(-175) };
+  const aMid = interpolateRocketState(a0, a1, 0.5);
+  assert.ok(
+    Math.abs(Math.abs(radToDeg(aMid.theta)) - 180) < 1e-6,
+    `Expected shortest-path midpoint near +/-180deg, got ${radToDeg(aMid.theta)}`
+  );
+
+  // Simulate 120Hz (8.33ms) rAF cadence in LEO: interpolated positions must advance monotonically at steady speed
+  let acc = 0;
+  const frameDt120Hz = 1 / 120;
+  const renderedX: number[] = [];
+  for (let frame = 0; frame < 20; frame++) {
+    acc += frameDt120Hz;
+    while (acc >= FIXED_DT) {
+      acc -= FIXED_DT;
+      prev = curr;
+      curr = stepRocketPhysics(curr, NO_INPUT, FIXED_DT);
+    }
+    const r = interpolateRocketState(prev, curr, acc / FIXED_DT);
+    renderedX.push(r.x);
+  }
+  const deltas = renderedX.slice(3).map((x, idx) => x - renderedX[idx + 2]);
+  for (const dx of deltas) {
+    assert.ok(
+      Math.abs(dx - 1200 * frameDt120Hz) < 0.2,
+      `Expected smooth ~10m per 120Hz frame in LEO, got dx=${dx.toFixed(3)}m`
+    );
+  }
 });

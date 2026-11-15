@@ -1,8 +1,19 @@
 import React from 'react';
 import { Pause, RotateCcw, Volume2, VolumeX, FastForward } from 'lucide-react';
-import { CATCH_MAX_THETA_DEG, CATCH_MAX_VX, CATCH_MAX_VY, UNIT_THRUST } from '../game/constants';
-import { getCatchPinPosition, radToDeg } from '../game/physics';
+import { getAssistModeConfig, GROUND_Y, UNIT_THRUST } from '../game/constants';
+import {
+  getAssistModeLabel,
+  getStageLocalized,
+  getTranslations,
+  type Locale,
+} from '../game/i18n';
+import {
+  getCatchPinPosition,
+  getEffectiveInitialFuelKg,
+  radToDeg,
+} from '../game/physics';
 import type {
+  AssistMode,
   DemoGuidanceOutput,
   EngineCount,
   FlightMode,
@@ -13,7 +24,9 @@ import type {
 export interface TelemetryHudProps {
   state: RocketState;
   stage: StageConfig;
+  assistMode: AssistMode;
   flightMode: FlightMode;
+  locale: Locale;
   demoGuidance: DemoGuidanceOutput | null;
   timeWarp: 1 | 5;
   muted: boolean;
@@ -38,7 +51,9 @@ const RAPTOR_LAYOUT: { x: number; y: number }[] = [
 export const TelemetryHud: React.FC<TelemetryHudProps> = ({
   state,
   stage,
+  assistMode,
   flightMode,
+  locale,
   demoGuidance,
   timeWarp,
   muted,
@@ -48,14 +63,20 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
   onPause,
   onRetry,
 }) => {
+  const t = getTranslations(locale);
+  const stageCopy = getStageLocalized(stage.id, locale);
+  const modeLabel = getAssistModeLabel(assistMode, locale);
   const isDemo = flightMode === 'demo';
+  const modeCfg = getAssistModeConfig(assistMode);
+  const effectiveFuelKg = getEffectiveInitialFuelKg(stage, assistMode);
+
   const pin = getCatchPinPosition(state);
   const speed = Math.hypot(state.vx, state.vy);
   const pitchDeg = radToDeg(state.theta);
   const gimbalDeg = radToDeg(state.gimbal);
   const fuelPct =
-    stage.initialFuelKg > 0
-      ? Math.max(0, Math.min(100, (state.fuelMass / stage.initialFuelKg) * 100))
+    effectiveFuelKg > 0
+      ? Math.max(0, Math.min(100, (state.fuelMass / effectiveFuelKg) * 100))
       : 0;
   const warpEligible = state.y >= 2_000 && !state.throttleOn;
 
@@ -66,9 +87,9 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
         ? 'bg-amber-400'
         : 'bg-cyan-400';
 
-  const vyOk = Math.abs(state.vy) <= CATCH_MAX_VY;
-  const vxOk = Math.abs(state.vx) <= CATCH_MAX_VX;
-  const pitchOk = Math.abs(pitchDeg) <= CATCH_MAX_THETA_DEG;
+  const vyOk = Math.abs(state.vy) <= modeCfg.catchMaxVy;
+  const vxOk = Math.abs(state.vx) <= modeCfg.catchMaxVx;
+  const pitchOk = Math.abs(pitchDeg) <= modeCfg.catchMaxThetaDeg;
 
   const formatT = (sec: number) => {
     const mins = Math.floor(sec / 60);
@@ -76,10 +97,43 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
     return `${String(mins).padStart(2, '0')}:${rem}`;
   };
 
-  const stopAltText =
-    state.hoverslamStopPinY !== null
+  const stopAltText = !state.hoverslamCanStop
+    ? t.hud.stopAltUnavailable
+    : state.hoverslamStopPinY !== null
       ? `${Math.round(state.hoverslamStopPinY)} m`
       : '--';
+
+  // Left-edge vertical altitude gauge scale calculations (Assisted mode only)
+  const showAltGauge = assistMode === 'assisted' && !isDemo;
+  const gaugeTopAlt = Math.max(
+    400,
+    Math.ceil((Math.max(pin.y, 400) * 1.12) / 200) * 200
+  );
+  const gaugeMinAlt = GROUND_Y; // -60m pad
+  const toGaugeBottomPct = (altM: number) => {
+    const clamped = Math.max(gaugeMinAlt, Math.min(gaugeTopAlt, altM));
+    return ((clamped - gaugeMinAlt) / (gaugeTopAlt - gaugeMinAlt)) * 100;
+  };
+  const catchLinePct = toGaugeBottomPct(0);
+  const shipAltPct = toGaugeBottomPct(pin.y);
+  const stop3Pct =
+    state.hoverslamStopPinY3 !== null
+      ? toGaugeBottomPct(state.hoverslamStopPinY3)
+      : null;
+  const stopCurrPct =
+    state.hoverslamStopPinY !== null
+      ? toGaugeBottomPct(state.hoverslamStopPinY)
+      : null;
+  const isBurnNowWindow =
+    state.vy < -0.5 &&
+    state.hoverslamCanStop &&
+    state.hoverslamStopPinY !== null &&
+    state.hoverslamStopPinY >= -4 &&
+    state.hoverslamStopPinY <= 20;
+  const isCurrentDanger =
+    state.vy < -0.5 &&
+    (!state.hoverslamCanStop ||
+      (state.hoverslamStopPinY !== null && state.hoverslamStopPinY < -4));
 
   return (
     <div className="fixed inset-0 pointer-events-none select-none flex flex-col justify-between p-4">
@@ -90,11 +144,20 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
             <div className="text-[11px] tracking-wide">
               {isDemo ? (
                 <span className="text-cyan-300 font-semibold">
-                  {stage.name} · お手本再生中（観戦専用）
+                  {stageCopy.name} · {t.hud.demoBadgeSuffix}
                 </span>
               ) : (
-                <span className="text-slate-400">
-                  {stage.name} · {stage.multiplier.toFixed(1)}×
+                <span className="text-slate-300">
+                  {stageCopy.name} ·{' '}
+                  <span
+                    className={
+                      assistMode === 'assisted'
+                        ? 'text-emerald-300 font-semibold'
+                        : 'text-cyan-300 font-semibold'
+                    }
+                  >
+                    {modeLabel}
+                  </span>
                 </span>
               )}
             </div>
@@ -111,7 +174,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
               e.currentTarget.blur();
               onToggleWarp();
             }}
-            title="Time Warp (T) — 高度 2,000m 以上・エンジンOFF時のみ使用可能"
+            title={t.hud.warpTitle}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-mono-tabular font-medium border transition-colors whitespace-nowrap shrink-0 ${
               timeWarp === 5
                 ? 'bg-amber-500/20 border-amber-400 text-amber-200'
@@ -129,7 +192,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
           <button
             type="button"
             tabIndex={-1}
-            aria-label={muted ? 'Unmute Audio' : 'Mute Audio'}
+            aria-label={muted ? t.hud.unmuteAria : t.hud.muteAria}
             onClick={(e) => {
               e.currentTarget.blur();
               onToggleMute();
@@ -142,30 +205,138 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
           <button
             type="button"
             tabIndex={-1}
-            aria-label="Retry Mission"
+            aria-label={t.hud.retryTitle}
             onClick={(e) => {
               e.currentTarget.blur();
               onRetry();
             }}
             className="w-10 h-10 flex items-center justify-center rounded-lg bg-[#0B101B]/90 border border-slate-700/60 text-slate-200 hover:border-cyan-400 hover:text-cyan-300 transition-colors"
-            title="Retry [R]"
+            title={t.hud.retryTitle}
           >
             <RotateCcw className="w-4 h-4" />
           </button>
           <button
             type="button"
             tabIndex={-1}
-            aria-label="Pause Simulation"
+            aria-label={t.hud.pauseTitle}
             onClick={(e) => {
               e.currentTarget.blur();
               onPause();
             }}
             className="w-10 h-10 flex items-center justify-center rounded-lg bg-[#0B101B]/90 border border-slate-700/60 text-slate-200 hover:border-cyan-400 hover:text-cyan-300 transition-colors"
-            title="Pause [P / Esc]"
+            title={t.hud.pauseTitle}
           >
             <Pause className="w-4 h-4" />
           </button>
         </div>
+      </div>
+
+      {/* Middle Row: Left-Edge Vertical Altitude Gauge (Assisted Mode Only) */}
+      <div className="flex-1 flex items-center justify-start py-3 min-h-0">
+        {showAltGauge && (
+          <aside
+            data-testid="assisted-alt-gauge"
+            aria-label={t.hud.altGaugeAria}
+            className="pointer-events-auto bg-[#0B101B]/90 border border-slate-700/70 rounded-xl px-2.5 py-2.5 flex flex-col items-center gap-1.5 h-full max-h-[320px] min-h-[220px]"
+          >
+            <div className="font-mono-tabular text-[10px] text-slate-300 tracking-wider whitespace-nowrap">
+              {gaugeTopAlt >= 1000
+                ? `${(gaugeTopAlt / 1000).toFixed(1)}km`
+                : `${gaugeTopAlt}m`}
+            </div>
+
+            {/* Vertical Altitude Track */}
+            <div className="relative flex-1 w-16 my-0.5 flex justify-center">
+              {/* Central rail */}
+              <div className="w-1.5 h-full rounded-full bg-slate-800 border border-slate-700/80 relative overflow-visible">
+                {/* Catch altitude 0m green line */}
+                <div
+                  className="absolute left-1/2 -translate-x-1/2 w-7 h-0.5 bg-emerald-400"
+                  style={{ bottom: `${catchLinePct}%` }}
+                />
+                <span
+                  className="absolute left-5 translate-y-1/2 font-mono-tabular text-[9px] text-emerald-300 font-semibold whitespace-nowrap"
+                  style={{ bottom: `${catchLinePct}%` }}
+                >
+                  0m
+                </span>
+
+                {/* Yellow Triangle: 3-Engine Reference Stop Marker */}
+                {stop3Pct !== null && state.vy < -0.5 && (
+                  <div
+                    data-testid="gauge-stop-3"
+                    title={t.hud.stop3Title}
+                    className="absolute right-full mr-1 translate-y-1/2 flex items-center gap-0.5"
+                    style={{ bottom: `${stop3Pct}%` }}
+                  >
+                    <span className="font-mono-tabular text-[9px] text-yellow-300 font-semibold">
+                      3
+                    </span>
+                    <svg width="8" height="10" viewBox="0 0 8 10" aria-hidden="true">
+                      <polygon points="0,1 8,5 0,9" fill="#facc15" />
+                    </svg>
+                  </div>
+                )}
+
+                {/* Orange Triangle: Current Selected Engine Stop Marker */}
+                {state.vy < -0.5 && (
+                  <div
+                    data-testid="gauge-stop-current"
+                    title={t.hud.stopCurrTitle}
+                    className="absolute left-full ml-1 translate-y-1/2 flex items-center gap-0.5"
+                    style={{
+                      bottom: `${stopCurrPct !== null ? stopCurrPct : 0}%`,
+                    }}
+                  >
+                    <svg width="8" height="10" viewBox="0 0 8 10" aria-hidden="true">
+                      <polygon
+                        points="8,1 0,5 8,9"
+                        fill={isCurrentDanger ? '#ef4444' : '#fb923c'}
+                      />
+                    </svg>
+                    <span
+                      className={`font-mono-tabular text-[9px] font-semibold whitespace-nowrap ${
+                        isCurrentDanger ? 'text-red-400' : 'text-orange-300'
+                      }`}
+                    >
+                      {state.hoverslamCanStop
+                        ? t.common.engineUnit(state.selectedEngines)
+                        : '!'}
+                    </span>
+                  </div>
+                )}
+
+                {/* Rocket Current Catch-Pin Altitude Icon */}
+                <div
+                  data-testid="gauge-ship-pin"
+                  className="absolute left-1/2 -translate-x-1/2 translate-y-1/2 flex items-center justify-center"
+                  style={{ bottom: `${shipAltPct}%` }}
+                >
+                  <div className="w-3.5 h-3.5 rounded-xs bg-cyan-400 border border-slate-950 shadow-xs" />
+                </div>
+              </div>
+            </div>
+
+            {/* Compact status & legend at base of gauge */}
+            <div className="font-mono-tabular text-[9px] text-center leading-tight space-y-0.5">
+              {isBurnNowWindow ? (
+                <div className="text-emerald-300 font-bold animate-pulse">
+                  {t.hud.burnNow}
+                </div>
+              ) : isCurrentDanger ? (
+                <div className="text-red-400 font-bold">{t.hud.boostWarn}</div>
+              ) : (
+                <div className="text-slate-400">{t.hud.padLabel}</div>
+              )}
+              <div className="flex items-center justify-center gap-1.5 text-slate-400">
+                <span className="text-yellow-300">▶3</span>
+                <span className={isCurrentDanger ? 'text-red-400' : 'text-orange-300'}>
+                  ◀{t.common.engineUnit(state.selectedEngines)}
+                </span>
+              </div>
+            </div>
+          </aside>
+        )}
       </div>
 
       {/* Bottom Center: Optional Demo Autopilot Commentary + SpaceX-Inspired Telemetry Console */}
@@ -208,7 +379,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
                 W / SPACE
               </span>
               <span className="ml-1 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-950/50 text-cyan-200 whitespace-nowrap">
-                {demoGuidance.selectedEngines}基
+                {t.common.engineUnit(demoGuidance.selectedEngines)}
               </span>
             </div>
 
@@ -228,14 +399,14 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
           {/* Left: Flight Kinematics (Speed, Alt, G, Max-Q, Hoverslam) */}
           <div className="grid grid-cols-3 gap-x-3 gap-y-1.5">
             <div>
-              <div className="text-[10px] tracking-wider text-slate-400">SPEED</div>
+              <div className="text-[10px] tracking-wider text-slate-400">{t.hud.speed}</div>
               <div className="font-mono-tabular text-lg font-semibold text-slate-50 leading-tight">
                 {Math.round(speed)}
                 <span className="text-[10px] text-slate-400 ml-1">m/s</span>
               </div>
             </div>
             <div>
-              <div className="text-[10px] tracking-wider text-slate-400">ALT (PIN)</div>
+              <div className="text-[10px] tracking-wider text-slate-400">{t.hud.altPin}</div>
               <div className="font-mono-tabular text-lg font-semibold text-cyan-300 leading-tight">
                 {Math.abs(pin.y) >= 1000
                   ? `${(pin.y / 1000).toFixed(2)}`
@@ -246,7 +417,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
               </div>
             </div>
             <div>
-              <div className="text-[10px] tracking-wider text-slate-400">OFFSET X</div>
+              <div className="text-[10px] tracking-wider text-slate-400">{t.hud.offsetX}</div>
               <div className="font-mono-tabular text-lg font-semibold text-slate-100 leading-tight">
                 {pin.x >= 0 ? '+' : ''}
                 {Math.round(pin.x)}
@@ -255,7 +426,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
             </div>
 
             <div>
-              <div className="text-[10px] tracking-wider text-slate-400">VEL X / Y</div>
+              <div className="text-[10px] tracking-wider text-slate-400">{t.hud.velXY}</div>
               <div className="font-mono-tabular text-xs font-medium leading-tight">
                 <span className={vxOk ? 'text-emerald-400' : 'text-slate-200'}>
                   {state.vx >= 0 ? '+' : ''}
@@ -268,18 +439,22 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
               </div>
             </div>
             <div>
-              <div className="text-[10px] tracking-wider text-slate-400">G / Q</div>
+              <div className="text-[10px] tracking-wider text-slate-400">{t.hud.gAndQ}</div>
               <div className="font-mono-tabular text-xs font-medium text-slate-200 leading-tight">
                 {state.gForce.toFixed(1)}G · {Math.round(state.dynamicPressureKpa)}kPa
               </div>
             </div>
             <div>
-              <div className="text-[10px] tracking-wider text-slate-400">STOP ALT</div>
+              <div className="text-[10px] tracking-wider text-slate-400">{t.hud.stopAlt}</div>
               <div
                 className={`font-mono-tabular text-xs font-medium leading-tight ${
-                  state.hoverslamStopPinY !== null && state.hoverslamStopPinY < -2
+                  !state.hoverslamCanStop ||
+                  (state.hoverslamStopPinY !== null && state.hoverslamStopPinY < -4)
                     ? 'text-red-400'
-                    : 'text-cyan-300'
+                    : state.hoverslamStopPinY !== null &&
+                        state.hoverslamStopPinY <= 20
+                      ? 'text-emerald-300'
+                      : 'text-cyan-300'
                 }`}
               >
                 {stopAltText}
@@ -338,7 +513,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
             <div className="flex flex-col gap-1.5 min-w-[140px]">
               <div className="flex items-baseline justify-between gap-2">
                 <span className="text-[10px] tracking-wider text-slate-400">
-                  RAPTOR THRUST
+                  {t.hud.raptorThrust}
                 </span>
                 <span className="font-mono-tabular text-xs font-semibold text-cyan-300">
                   {((state.activeEngines * UNIT_THRUST) / 1_000_000).toFixed(1)} MN
@@ -372,7 +547,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
               </div>
 
               <div className="flex items-center justify-between text-[11px] font-mono-tabular text-slate-400">
-                <span>GIMBAL</span>
+                <span>{t.hud.gimbal}</span>
                 <span className="text-slate-200">
                   {gimbalDeg >= 0 ? '+' : ''}
                   {gimbalDeg.toFixed(1)}°
@@ -386,7 +561,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
             <div className="flex-1">
               <div className="flex items-baseline justify-between mb-1">
                 <span className="text-[10px] tracking-wider text-slate-400">
-                  CH4 / LOX
+                  {t.hud.propellant}
                 </span>
                 <span
                   className={`font-mono-tabular text-sm font-semibold ${

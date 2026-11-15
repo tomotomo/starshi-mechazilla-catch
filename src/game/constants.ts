@@ -1,4 +1,4 @@
-import type { StageConfig } from './types';
+import type { AssistMode, AssistModeConfig, StageConfig } from './types';
 
 export const FIXED_DT = 1 / 60;
 
@@ -40,13 +40,49 @@ export const TOWER_STRUCTURE_MIN_X = 12.5; // [m] collision boundary of tower tr
 export const TOWER_TOP_Y = 40; // [m] top of launch tower relative to catch zone
 export const CATCH_ARM_TIP_X = -6; // [m] open/catch arm span
 
-// Catch envelope tolerances
+// Catch envelope tolerances (Realistic baseline constants)
 export const CATCH_TOLERANCE_X = 4.0; // [m]
 export const CATCH_TOLERANCE_Y = 4.0; // [m]
 export const CATCH_MAX_VY = 2.5; // [m/s]
 export const CATCH_MAX_VX = 1.5; // [m/s]
 export const CATCH_MAX_THETA_DEG = 5.0; // [deg]
 export const CATCH_MAX_OMEGA_DEG = 5.0; // [deg/s]
+
+// Assist Mode parameter profiles (Realistic vs Assisted)
+export const ASSIST_MODE_CONFIGS: Record<AssistMode, AssistModeConfig> = {
+  realistic: {
+    id: 'realistic',
+    label: '通常モード (Realistic)',
+    shortLabel: 'Realistic',
+    fuelFactor: 1.0,
+    fuelFullScoreRatio: 0.08,
+    modeMultiplier: 1.0,
+    catchToleranceX: 4.0,
+    catchToleranceY: 4.0,
+    catchMaxVy: 2.5,
+    catchMaxVx: 1.5,
+    catchMaxThetaDeg: 5.0,
+    catchMaxOmegaDeg: 5.0,
+  },
+  assisted: {
+    id: 'assisted',
+    label: '簡易モード (Assisted)',
+    shortLabel: 'Assisted',
+    fuelFactor: 1.25,
+    fuelFullScoreRatio: 0.15,
+    modeMultiplier: 0.7,
+    catchToleranceX: 8.0,
+    catchToleranceY: 8.0,
+    catchMaxVy: 6.0,
+    catchMaxVx: 4.0,
+    catchMaxThetaDeg: 12.0,
+    catchMaxOmegaDeg: 15.0,
+  },
+};
+
+export function getAssistModeConfig(mode: AssistMode = 'realistic'): AssistModeConfig {
+  return ASSIST_MODE_CONFIGS[mode];
+}
 
 // Stage configurations tuned for tight ~8-15% fuel margin on optimal Hoverslam
 export const STAGES: StageConfig[] = [
@@ -87,7 +123,7 @@ export const STAGES: StageConfig[] = [
     initialX: -2_500,
     initialVx: 280,
     initialVy: -650,
-    initialThetaDeg: -45,
+    initialThetaDeg: 65,
     initialFuelKg: 18_500,
     multiplier: 2.0,
     strategyTip: '機体の腹を進行方向へ向けるベリーフロップで空気抵抗を最大化しないと燃料が足りません。',

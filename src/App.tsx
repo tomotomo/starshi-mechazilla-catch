@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DebriefModal } from './components/DebriefModal';
+import { LanguageSettingsModal } from './components/LanguageSettingsModal';
 import { PauseModal } from './components/PauseModal';
 import { TelemetryHud } from './components/TelemetryHud';
 import { TitleScreen } from './components/TitleScreen';
@@ -7,14 +8,27 @@ import { SoundEngine } from './game/audio';
 import { computeEasyDemoGuidance } from './game/autopilot';
 import { FIXED_DT, STAGES } from './game/constants';
 import {
+  detectBrowserLocale,
+  getStageLocalized,
+  loadLanguagePreference,
+  resolveLocale,
+  saveLanguagePreference,
+  type LanguagePreference,
+  type Locale,
+} from './game/i18n';
+import {
   calculateScore,
   createInitialRocketState,
+  estimateHoverslamPrediction,
   evaluateOutcome,
+  getEffectiveInitialFuelKg,
+  interpolateRocketState,
   stepRocketPhysics,
   toTelemetryFrame,
 } from './game/physics';
 import { GameCanvasRenderer } from './game/renderer';
 import type {
+  AssistMode,
   ControlInput,
   DemoGuidanceOutput,
   DifficultyId,
@@ -34,14 +48,25 @@ function getStageById(id: DifficultyId): StageConfig {
 
 function parseInitialParams(): {
   stageId: DifficultyId;
+  assistMode: AssistMode;
   autostart: boolean;
   demo: boolean;
+  langOverride: Locale | null;
 } {
   if (typeof window === 'undefined') {
-    return { stageId: 'easy', autostart: false, demo: false };
+    return {
+      stageId: 'easy',
+      assistMode: 'realistic',
+      autostart: false,
+      demo: false,
+      langOverride: null,
+    };
   }
   const params = new URLSearchParams(window.location.search);
   const demo = params.get('demo') === '1';
+  const assistParam = params.get('assist');
+  const assistMode: AssistMode =
+    !demo && assistParam === 'assisted' ? 'assisted' : 'realistic';
   const stageParam = params.get('stage');
   const validStage = demo
     ? 'easy'
@@ -49,12 +74,17 @@ function parseInitialParams(): {
       ? (stageParam as DifficultyId)
       : 'easy';
   const autostart = params.get('autostart') === '1';
-  return { stageId: validStage, autostart, demo };
+  const langParam = params.get('lang');
+  const langOverride: Locale | null =
+    langParam === 'ja' || langParam === 'en' ? langParam : null;
+  return { stageId: validStage, assistMode, autostart, demo, langOverride };
 }
 
 interface SimSession {
   mode: FlightMode;
+  assistMode: AssistMode;
   stage: StageConfig;
+  prevRocket: RocketState;
   rocket: RocketState;
   input: ControlInput;
   demoGuidance: DemoGuidanceOutput | null;
@@ -69,16 +99,35 @@ interface SimSession {
 
 export default function App() {
   const initialParams = parseInitialParams();
+  const [browserLocaleInfo] = useState(() => detectBrowserLocale());
+  const [langPreference, setLangPreference] = useState<LanguagePreference>(() =>
+    loadLanguagePreference()
+  );
+  const [urlLangOverride, setUrlLangOverride] = useState<Locale | null>(
+    initialParams.langOverride
+  );
+  const locale: Locale = resolveLocale(
+    langPreference,
+    browserLocaleInfo.locale,
+    urlLangOverride
+  );
+  const [isLanguageModalOpen, setIsLanguageModalOpen] = useState(false);
 
   const [phase, setPhase] = useState<GamePhase>('title');
   const [flightMode, setFlightMode] = useState<FlightMode>('manual');
+  const [assistMode, setAssistMode] = useState<AssistMode>(
+    initialParams.assistMode
+  );
   const [selectedStageId, setSelectedStageId] = useState<DifficultyId>(
     initialParams.stageId
   );
   const [timeWarp, setTimeWarp] = useState<1 | 5>(1);
   const [muted, setMuted] = useState(false);
   const [hudRocket, setHudRocket] = useState<RocketState>(() =>
-    createInitialRocketState(getStageById(initialParams.stageId))
+    createInitialRocketState(
+      getStageById(initialParams.stageId),
+      initialParams.assistMode
+    )
   );
   const [hudDemoGuidance, setHudDemoGuidance] =
     useState<DemoGuidanceOutput | null>(null);
@@ -104,12 +153,22 @@ export default function App() {
   phaseRef.current = phase;
   const timeWarpRef = useRef<1 | 5>(timeWarp);
   timeWarpRef.current = timeWarp;
+  const localeRef = useRef<Locale>(locale);
+  localeRef.current = locale;
+  const langModalOpenRef = useRef<boolean>(isLanguageModalOpen);
+  langModalOpenRef.current = isLanguageModalOpen;
 
   const resultTimerRef = useRef<number | null>(null);
+  const initialSimRocket = createInitialRocketState(
+    getStageById(initialParams.stageId),
+    initialParams.assistMode
+  );
   const simRef = useRef<SimSession>({
     mode: 'manual',
+    assistMode: initialParams.assistMode,
     stage: getStageById(initialParams.stageId),
-    rocket: createInitialRocketState(getStageById(initialParams.stageId)),
+    prevRocket: initialSimRocket,
+    rocket: initialSimRocket,
     input: { gimbalLeft: false, gimbalRight: false, throttleHold: false },
     demoGuidance: null,
     telemetry: [],
@@ -135,22 +194,41 @@ export default function App() {
     soundRef.current?.setEngineThrust(0);
   }, []);
 
-  // Sync body dataset state & flight mode for deterministic testing and inspection
+  // Sync body dataset state, flight mode, assist mode & resolved language
   useEffect(() => {
     document.body.dataset.state = phase;
     document.body.dataset.mode = flightMode;
-  }, [phase, flightMode]);
+    document.body.dataset.assistMode = assistMode;
+    document.body.dataset.lang = locale;
+    document.documentElement.lang = locale;
+  }, [phase, flightMode, assistMode, locale]);
+
+  const handleSelectLanguagePreference = useCallback((pref: LanguagePreference) => {
+    soundRef.current?.playUiTick(540);
+    setUrlLangOverride(null);
+    setLangPreference(pref);
+    saveLanguagePreference(pref);
+  }, []);
 
   const startMission = useCallback(
-    (stageIdOverride?: DifficultyId, modeOverride: FlightMode = 'manual') => {
+    (
+      stageIdOverride?: DifficultyId,
+      modeOverride: FlightMode = 'manual',
+      assistModeOverride?: AssistMode
+    ) => {
       clearPendingResultTimer();
+      setIsLanguageModalOpen(false);
       const targetMode: FlightMode = modeOverride;
+      const targetAssistMode: AssistMode =
+        targetMode === 'demo' ? 'realistic' : (assistModeOverride ?? assistMode);
       const targetId: DifficultyId =
         targetMode === 'demo' ? 'easy' : (stageIdOverride ?? selectedStageId);
       const stage = getStageById(targetId);
-      let initialRocket = createInitialRocketState(stage);
+      let initialRocket = createInitialRocketState(stage, targetAssistMode);
       const initialGuidance =
-        targetMode === 'demo' ? computeEasyDemoGuidance(initialRocket) : null;
+        targetMode === 'demo'
+          ? computeEasyDemoGuidance(initialRocket, localeRef.current)
+          : null;
       if (initialGuidance) {
         initialRocket = {
           ...initialRocket,
@@ -164,13 +242,15 @@ export default function App() {
 
       simRef.current = {
         mode: targetMode,
+        assistMode: targetAssistMode,
         stage,
+        prevRocket: initialRocket,
         rocket: initialRocket,
         input: initialGuidance
           ? { ...initialGuidance.input }
           : { gimbalLeft: false, gimbalRight: false, throttleHold: false },
         demoGuidance: initialGuidance,
-        telemetry: [toTelemetryFrame(initialRocket, stage)],
+        telemetry: [toTelemetryFrame(initialRocket, stage, targetAssistMode)],
         stepCounter: 0,
         maxGForce: initialRocket.gForce,
         maxDynamicPressureKpa: initialRocket.dynamicPressureKpa,
@@ -182,6 +262,7 @@ export default function App() {
       rendererRef.current?.resetVisuals(initialRocket);
       setSelectedStageId(targetId);
       setFlightMode(targetMode);
+      setAssistMode(targetAssistMode);
       setTimeWarp(1);
       timeWarpRef.current = 1;
       setGameResult(null);
@@ -191,14 +272,19 @@ export default function App() {
       phaseRef.current = 'playing';
       document.body.dataset.state = 'playing';
       document.body.dataset.mode = targetMode;
+      document.body.dataset.assistMode = targetAssistMode;
     },
-    [clearPendingResultTimer, selectedStageId]
+    [assistMode, clearPendingResultTimer, selectedStageId]
   );
 
-  // Support ?autostart=1 (and optional ?demo=1) on initial load
+  // Support ?autostart=1 (and optional ?demo=1 / ?assist=assisted) on initial load
   useEffect(() => {
     if (initialParams.autostart) {
-      startMission(initialParams.stageId, initialParams.demo ? 'demo' : 'manual');
+      startMission(
+        initialParams.stageId,
+        initialParams.demo ? 'demo' : 'manual',
+        initialParams.assistMode
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -212,9 +298,12 @@ export default function App() {
       return;
     }
     if (simRef.current.rocket.selectedEngines !== count) {
+      const predCurrent = estimateHoverslamPrediction(simRef.current.rocket, count);
       simRef.current.rocket = {
         ...simRef.current.rocket,
         selectedEngines: count,
+        hoverslamStopPinY: predCurrent.stopPinY,
+        hoverslamCanStop: predCurrent.canStop,
       };
       soundRef.current?.playUiTick(420 + count * 45);
       setHudRocket({ ...simRef.current.rocket });
@@ -281,6 +370,13 @@ export default function App() {
       }
 
       if (phaseRef.current === 'title') {
+        if (langModalOpenRef.current) {
+          if (code === 'Escape') {
+            e.preventDefault();
+            setIsLanguageModalOpen(false);
+          }
+          return;
+        }
         if (code === 'Enter' || code === 'Space') {
           e.preventDefault();
           startMission();
@@ -468,7 +564,7 @@ export default function App() {
           let discreteHudSync = false;
 
           if (sim.mode === 'demo') {
-            const preGuidance = computeEasyDemoGuidance(sim.rocket);
+            const preGuidance = computeEasyDemoGuidance(sim.rocket, localeRef.current);
             if (
               timeWarpRef.current === 5 &&
               (sim.rocket.y < 2_000 || preGuidance.input.throttleHold)
@@ -493,7 +589,7 @@ export default function App() {
             steps += 1;
 
             if (sim.mode === 'demo') {
-              const guidance = computeEasyDemoGuidance(sim.rocket);
+              const guidance = computeEasyDemoGuidance(sim.rocket, localeRef.current);
               const prevGuidance = sim.demoGuidance;
               if (guidance.selectedEngines !== sim.rocket.selectedEngines) {
                 sim.rocket = {
@@ -525,6 +621,7 @@ export default function App() {
               }
             }
 
+            sim.prevRocket = sim.rocket;
             sim.rocket = stepRocketPhysics(sim.rocket, sim.input, FIXED_DT);
             sim.stepCounter += 1;
 
@@ -536,15 +633,21 @@ export default function App() {
             }
 
             if (sim.stepCounter % 6 === 0) {
-              sim.telemetry.push(toTelemetryFrame(sim.rocket, sim.stage));
+              sim.telemetry.push(
+                toTelemetryFrame(sim.rocket, sim.stage, sim.assistMode)
+              );
             }
 
-            const check = evaluateOutcome(sim.rocket);
+            const check = evaluateOutcome(sim.rocket, sim.assistMode, localeRef.current);
             if (check.terminated && check.outcome) {
               sim.outcome = check.outcome;
               sim.accumulator = 0;
 
-              const finalFrame = toTelemetryFrame(sim.rocket, sim.stage);
+              const finalFrame = toTelemetryFrame(
+                sim.rocket,
+                sim.stage,
+                sim.assistMode
+              );
               const lastRecorded = sim.telemetry[sim.telemetry.length - 1];
               if (!lastRecorded || lastRecorded.time !== finalFrame.time) {
                 sim.telemetry.push(finalFrame);
@@ -552,10 +655,11 @@ export default function App() {
 
               const isSuccess = check.outcome === 'CATCH_SUCCESS';
               const score = isSuccess
-                ? calculateScore(sim.rocket, sim.stage)
+                ? calculateScore(sim.rocket, sim.stage, sim.assistMode)
                 : null;
 
               if (isSuccess) {
+                const caughtRocketSnapshot = { ...sim.rocket };
                 sim.rocket = {
                   ...sim.rocket,
                   vx: 0,
@@ -564,7 +668,7 @@ export default function App() {
                   activeEngines: 0,
                   throttleOn: false,
                 };
-                renderer.triggerCatchClamp();
+                renderer.triggerCatchClamp(caughtRocketSnapshot);
                 sound?.playCatchSuccess();
               } else {
                 renderer.triggerExplosion(sim.rocket.x, sim.rocket.y);
@@ -581,6 +685,8 @@ export default function App() {
 
               const resultPayload: GameResult = {
                 mode: sim.mode,
+                assistMode: sim.assistMode,
+                initialFuelKg: getEffectiveInitialFuelKg(sim.stage, sim.assistMode),
                 outcome: check.outcome,
                 success: isSuccess,
                 reason: check.reason,
@@ -620,12 +726,40 @@ export default function App() {
           }
         }
 
+        const renderAlpha =
+          sim.outcome === null
+            ? Math.max(0, Math.min(1, sim.accumulator / FIXED_DT))
+            : 1;
+        const renderRocket =
+          sim.outcome === null
+            ? interpolateRocketState(sim.prevRocket, sim.rocket, renderAlpha)
+            : sim.rocket;
+
         sound?.setEngineThrust(sim.outcome ? 0 : sim.rocket.activeEngines);
-        renderer.updateEffects(sim.rocket, rawDt, sim.outcome);
-        renderer.render(ctx, width, height, sim.rocket, sim.outcome, sim.mode === 'demo');
+        renderer.updateEffects(renderRocket, rawDt, sim.outcome);
+        renderer.render(
+          ctx,
+          width,
+          height,
+          renderRocket,
+          sim.outcome,
+          sim.mode === 'demo',
+          sim.assistMode,
+          localeRef.current,
+          rawDt
+        );
       } else if (currentPhase === 'paused') {
         if (!pausedRendered || sizeChanged) {
-          renderer.render(ctx, width, height, sim.rocket, sim.outcome, sim.mode === 'demo');
+          renderer.render(
+            ctx,
+            width,
+            height,
+            sim.rocket,
+            sim.outcome,
+            sim.mode === 'demo',
+            sim.assistMode,
+            localeRef.current
+          );
           pausedRendered = true;
         }
         rafId = 0;
@@ -640,7 +774,16 @@ export default function App() {
         if (gameoverElapsed < 1.2 || sizeChanged) {
           gameoverElapsed += rawDt;
           renderer.updateEffects(sim.rocket, rawDt, sim.outcome);
-          renderer.render(ctx, width, height, sim.rocket, sim.outcome, sim.mode === 'demo');
+          renderer.render(
+            ctx,
+            width,
+            height,
+            sim.rocket,
+            sim.outcome,
+            sim.mode === 'demo',
+            sim.assistMode,
+            localeRef.current
+          );
           rafId = window.requestAnimationFrame(tick);
         } else {
           rafId = 0;
@@ -679,12 +822,35 @@ export default function App() {
         <TitleScreen
           stages={STAGES}
           selectedStageId={selectedStageId}
+          assistMode={assistMode}
+          locale={locale}
           onSelectStage={(id) => {
             soundRef.current?.playUiTick(500);
             setSelectedStageId(id);
           }}
-          onStart={() => startMission(selectedStageId, 'manual')}
-          onStartDemo={() => startMission('easy', 'demo')}
+          onSelectAssistMode={(mode) => {
+            soundRef.current?.playUiTick(mode === 'assisted' ? 580 : 480);
+            setAssistMode(mode);
+          }}
+          onOpenLanguageSettings={() => {
+            soundRef.current?.playUiTick(560);
+            setIsLanguageModalOpen(true);
+          }}
+          onStart={() => startMission(selectedStageId, 'manual', assistMode)}
+          onStartDemo={() => startMission('easy', 'demo', 'realistic')}
+        />
+      )}
+
+      {phase === 'title' && isLanguageModalOpen && (
+        <LanguageSettingsModal
+          preference={langPreference}
+          resolvedLocale={locale}
+          browserInfo={browserLocaleInfo}
+          onSelectPreference={handleSelectLanguagePreference}
+          onClose={() => {
+            soundRef.current?.playUiTick(480);
+            setIsLanguageModalOpen(false);
+          }}
         />
       )}
 
@@ -692,7 +858,9 @@ export default function App() {
         <TelemetryHud
           state={hudRocket}
           stage={simRef.current.stage}
+          assistMode={simRef.current.assistMode}
           flightMode={flightMode}
+          locale={locale}
           demoGuidance={hudDemoGuidance}
           timeWarp={timeWarp}
           muted={muted}
@@ -700,17 +868,31 @@ export default function App() {
           onToggleWarp={handleToggleWarp}
           onToggleMute={handleToggleMute}
           onPause={handlePauseToggle}
-          onRetry={() => startMission(simRef.current.stage.id, simRef.current.mode)}
+          onRetry={() =>
+            startMission(
+              simRef.current.stage.id,
+              simRef.current.mode,
+              simRef.current.assistMode
+            )
+          }
         />
       )}
 
       {phase === 'paused' && (
         <PauseModal
-          stageName={`${simRef.current.stage.name} — ${simRef.current.stage.subtitle}`}
+          stageName={`${getStageLocalized(simRef.current.stage.id, locale).name} — ${getStageLocalized(simRef.current.stage.id, locale).subtitle}`}
+          assistMode={simRef.current.assistMode}
           flightMode={flightMode}
+          locale={locale}
           onResume={handlePauseToggle}
-          onRestart={() => startMission(simRef.current.stage.id, simRef.current.mode)}
-          onSwitchToManual={() => startMission('easy', 'manual')}
+          onRestart={() =>
+            startMission(
+              simRef.current.stage.id,
+              simRef.current.mode,
+              simRef.current.assistMode
+            )
+          }
+          onSwitchToManual={() => startMission('easy', 'manual', assistMode)}
           onQuitToTitle={handleQuitToTitle}
         />
       )}
@@ -718,8 +900,17 @@ export default function App() {
       {phase === 'gameover' && gameResult && (
         <DebriefModal
           result={gameResult}
-          onRetry={() => startMission(gameResult.stage.id, gameResult.mode)}
-          onPlayManual={() => startMission(gameResult.stage.id, 'manual')}
+          locale={locale}
+          onRetry={() =>
+            startMission(
+              gameResult.stage.id,
+              gameResult.mode,
+              gameResult.assistMode
+            )
+          }
+          onPlayManual={() =>
+            startMission(gameResult.stage.id, 'manual', assistMode)
+          }
           onMissionSelect={handleQuitToTitle}
         />
       )}

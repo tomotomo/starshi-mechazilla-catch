@@ -1,16 +1,15 @@
 import {
-  CATCH_TOLERANCE_X,
-  CATCH_TOLERANCE_Y,
+  getAssistModeConfig,
   GROUND_Y,
   R_CATCH_PIN,
-  R_ENGINE,
   SHIP_DIAMETER,
   SHIP_LENGTH,
   TOWER_TOP_Y,
   TOWER_X,
 } from './constants';
+import { getTranslations, type Locale } from './i18n';
 import { getBottomPosition, getCatchPinPosition } from './physics';
-import type { OutcomeKind, RocketState } from './types';
+import type { AssistMode, OutcomeKind, RocketState } from './types';
 
 type ParticleKind = 'exhaust' | 'dust' | 'plasma' | 'fire' | 'debris';
 
@@ -45,6 +44,8 @@ export class GameCanvasRenderer {
   private cameraInitialized = false;
   private shakeTrauma = 0;
   private chopstickClose = 0; // 0 = open, 1 = clamped shut
+  private catchSnapStart: { x: number; y: number; theta: number } | null = null;
+  private catchSnapProgress = 0;
   private timeAccum = 0;
 
   constructor() {
@@ -74,6 +75,8 @@ export class GameCanvasRenderer {
     }
     this.shakeTrauma = 0;
     this.chopstickClose = 0;
+    this.catchSnapStart = null;
+    this.catchSnapProgress = 0;
     this.cameraInitialized = false;
     if (state) {
       this.camX = state.x * 0.5;
@@ -98,8 +101,12 @@ export class GameCanvasRenderer {
     }
   }
 
-  public triggerCatchClamp(): void {
+  public triggerCatchClamp(state?: RocketState): void {
     this.shakeTrauma = 0.25;
+    this.catchSnapStart = state
+      ? { x: state.x, y: state.y, theta: state.theta }
+      : null;
+    this.catchSnapProgress = 0;
   }
 
   private spawnParticle(
@@ -134,8 +141,10 @@ export class GameCanvasRenderer {
 
     if (outcome === 'CATCH_SUCCESS') {
       this.chopstickClose = Math.min(1, this.chopstickClose + dt * 5.5);
+      this.catchSnapProgress = Math.min(1, this.catchSnapProgress + dt * 3.0);
     } else {
       this.chopstickClose = Math.max(0, this.chopstickClose - dt * 3);
+      this.catchSnapProgress = 0;
     }
 
     // Spawn engine exhaust & pad dust if engines are firing
@@ -257,7 +266,7 @@ export class GameCanvasRenderer {
     ctx.translate(-camX, -camY);
 
     this.drawGroundAndPad(ctx, camX, width / zoom);
-    this.drawMechazillaTower(ctx, false);
+    this.drawMechazillaTower(ctx, false, 'realistic');
 
     // Show Starship poised beside chopsticks in gentle atmospheric hover showcase
     const bobY = Math.sin(timeSec * 0.8) * 1.8 + 38;
@@ -279,6 +288,9 @@ export class GameCanvasRenderer {
       gForce: 0,
       dynamicPressureKpa: 0,
       hoverslamStopPinY: null,
+      hoverslamCanStop: true,
+      hoverslamStopPinY3: null,
+      hoverslam3CanStop: true,
     };
     this.drawStarship(ctx, showcaseState, false);
     ctx.restore();
@@ -290,16 +302,32 @@ export class GameCanvasRenderer {
     height: number,
     state: RocketState,
     outcome: OutcomeKind | null,
-    isDemo = false
+    isDemo = false,
+    assistMode: AssistMode = 'realistic',
+    locale: Locale = 'ja',
+    dt = 1 / 60
   ): void {
+    // Smoothly snap caught ship's pin to (0, 0) and pitch to 0 deg as chopsticks close
+    let renderState = state;
+    if (outcome === 'CATCH_SUCCESS' && this.catchSnapStart) {
+      const t = 1 - Math.pow(1 - this.catchSnapProgress, 3);
+      renderState = {
+        ...state,
+        x: this.catchSnapStart.x + (0 - this.catchSnapStart.x) * t,
+        y: this.catchSnapStart.y + (-R_CATCH_PIN - this.catchSnapStart.y) * t,
+        theta: this.catchSnapStart.theta + (0 - this.catchSnapStart.theta) * t,
+      };
+    }
     // 1. Compute dynamic target zoom & camera pan based on altitude & distance from tower
     const pin = getCatchPinPosition(state);
     const distToTower = Math.hypot(pin.x, pin.y);
     const minDim = Math.min(width, height);
+    const safeDt = Math.max(0, Math.min(0.1, dt));
 
     let targetZoom: number;
     let targetCamX: number;
     let targetCamY: number;
+    let isHighAltTrack = false;
 
     if (distToTower < 180) {
       // Close-in catch framing: tower and ship clearly visible together
@@ -313,11 +341,12 @@ export class GameCanvasRenderer {
       targetCamX = state.x * 0.52;
       targetCamY = Math.max(10, state.y * 0.48);
     } else {
-      // High-altitude / reentry: track ship closely enough to read orientation & aero flaps
+      // High-altitude / reentry: lock directly onto interpolated ship center to avoid velocity-lag jitter
       const altFactor = Math.min(1, (state.y - 1_600) / 30_000);
       targetZoom = 1.45 - altFactor * 0.55; // ~1.45 -> ~0.90 px/m
       targetCamX = state.x;
       targetCamY = state.y;
+      isHighAltTrack = true;
     }
 
     if (!this.cameraInitialized) {
@@ -326,10 +355,16 @@ export class GameCanvasRenderer {
       this.camZoom = targetZoom;
       this.cameraInitialized = true;
     } else {
-      const lerp = 0.14;
-      this.camX += (targetCamX - this.camX) * lerp;
-      this.camY += (targetCamY - this.camY) * lerp;
-      this.camZoom += (targetZoom - this.camZoom) * 0.12;
+      const zoomAlpha = 1 - Math.exp(-6.5 * safeDt);
+      this.camZoom += (targetZoom - this.camZoom) * zoomAlpha;
+      if (isHighAltTrack) {
+        this.camX = targetCamX;
+        this.camY = targetCamY;
+      } else {
+        const posAlpha = 1 - Math.exp(-8.5 * safeDt);
+        this.camX += (targetCamX - this.camX) * posAlpha;
+        this.camY += (targetCamY - this.camY) * posAlpha;
+      }
     }
 
     // Apply decaying trauma camera shake
@@ -363,16 +398,18 @@ export class GameCanvasRenderer {
 
     // Draw tower if within reasonable view range
     if (this.camY < 2_500) {
-      this.drawMechazillaTower(ctx, outcome === 'CATCH_SUCCESS');
+      this.drawMechazillaTower(ctx, outcome === 'CATCH_SUCCESS', assistMode);
     }
 
-    // Draw Hoverslam stopping altitude reference bar when descending
+    // Assisted Mode ONLY: World-space Suicide Burn / Hoverslam horizontal target bar along x = 0
     if (
-      state.hoverslamStopPinY !== null &&
+      assistMode === 'assisted' &&
+      !isDemo &&
       !outcome &&
-      this.camY < 4_500
+      renderState.vy < -0.5 &&
+      this.camY < 12_000
     ) {
-      this.drawHoverslamIndicator(ctx, state.hoverslamStopPinY, state.x);
+      this.drawHoverslamIndicator(ctx, renderState, height, locale);
     }
 
     // Draw particles behind / around vehicle
@@ -381,14 +418,14 @@ export class GameCanvasRenderer {
     // Draw Starship unless completely vaporized in RUD
     const isRud = outcome !== null && outcome !== 'CATCH_SUCCESS';
     if (!isRud) {
-      this.drawStarship(ctx, state, outcome === 'CATCH_SUCCESS');
-      this.drawTacticalVectors(ctx, state);
+      this.drawStarship(ctx, renderState, outcome === 'CATCH_SUCCESS');
+      this.drawTacticalVectors(ctx, renderState);
     }
 
     ctx.restore();
 
     // 4. Screen-space target beacon if tower (0, 0) is outside viewport
-    this.drawOffscreenTargetIndicator(ctx, width, height, state, isDemo);
+    this.drawOffscreenTargetIndicator(ctx, width, height, renderState, isDemo, locale);
   }
 
   private cachedSkyKey = '';
@@ -452,7 +489,8 @@ export class GameCanvasRenderer {
     viewW: number,
     viewH: number
   ): void {
-    const step = viewH > 4000 ? 2000 : viewH > 900 ? 500 : 100;
+    const step =
+      viewH > 4000 ? 2000 : camY > 15_000 ? 1000 : viewH > 900 ? 500 : 100;
     const minY = Math.max(0, Math.floor((camY - viewH * 0.6) / step) * step);
     const maxY = Math.ceil((camY + viewH * 0.6) / step) * step;
 
@@ -505,8 +543,13 @@ export class GameCanvasRenderer {
 
   private drawMechazillaTower(
     ctx: CanvasRenderingContext2D,
-    caught: boolean
+    caught: boolean,
+    assistMode: AssistMode
   ): void {
+    const modeCfg = getAssistModeConfig(assistMode);
+    const tolX = modeCfg.catchToleranceX;
+    const tolY = modeCfg.catchToleranceY;
+
     const towerLeft = TOWER_X;
     const towerWidth = 11;
     const towerRight = towerLeft + towerWidth;
@@ -557,14 +600,15 @@ export class GameCanvasRenderer {
 
     // Chopstick arms (open wide during descent, clamp onto pin rails when caught)
     const armSpread = 1 - this.chopstickClose * 0.55;
-    const armYOffset = 3.2 * armSpread;
+    const armYOffset = (assistMode === 'assisted' ? 4.4 : 3.2) * armSpread;
+    const tipX = assistMode === 'assisted' ? -9.5 : -7.5;
 
     ctx.fillStyle = caught ? '#10b981' : '#94a3b8';
     // Upper arm beam
     ctx.beginPath();
     ctx.moveTo(towerLeft - 0.5, armYOffset + 1.8);
-    ctx.lineTo(-7.5, armYOffset + 0.6);
-    ctx.lineTo(-7.5, armYOffset - 0.8);
+    ctx.lineTo(tipX, armYOffset + 0.6);
+    ctx.lineTo(tipX, armYOffset - 0.8);
     ctx.lineTo(towerLeft - 0.5, armYOffset - 1.4);
     ctx.closePath();
     ctx.fill();
@@ -573,8 +617,8 @@ export class GameCanvasRenderer {
     ctx.fillStyle = caught ? '#059669' : '#64748b';
     ctx.beginPath();
     ctx.moveTo(towerLeft - 0.5, -armYOffset + 1.2);
-    ctx.lineTo(-7.5, -armYOffset + 0.6);
-    ctx.lineTo(-7.5, -armYOffset - 1.0);
+    ctx.lineTo(tipX, -armYOffset + 0.6);
+    ctx.lineTo(tipX, -armYOffset - 1.0);
     ctx.lineTo(towerLeft - 0.5, -armYOffset - 1.6);
     ctx.closePath();
     ctx.fill();
@@ -584,12 +628,7 @@ export class GameCanvasRenderer {
       ctx.strokeStyle = 'rgba(16, 185, 129, 0.72)';
       ctx.lineWidth = Math.max(0.25, 1.4 / this.camZoom);
       ctx.setLineDash([2.2, 2.2]);
-      ctx.strokeRect(
-        -CATCH_TOLERANCE_X,
-        -CATCH_TOLERANCE_Y,
-        CATCH_TOLERANCE_X * 2,
-        CATCH_TOLERANCE_Y * 2
-      );
+      ctx.strokeRect(-tolX, -tolY, tolX * 2, tolY * 2);
       ctx.setLineDash([]);
 
       // Center crosshair dot
@@ -602,28 +641,95 @@ export class GameCanvasRenderer {
 
   private drawHoverslamIndicator(
     ctx: CanvasRenderingContext2D,
-    stopPinY: number,
-    shipX: number
+    state: RocketState,
+    viewportHeight: number,
+    locale: Locale
   ): void {
-    const clampedY = Math.max(GROUND_Y + 2, stopPinY);
-    const isDanger = clampedY < -4; // Would hit ground before stopping!
-    const isNominal = Math.abs(clampedY) <= CATCH_TOLERANCE_Y;
+    const t = getTranslations(locale);
+    const invZoom = 1 / this.camZoom;
+    const hudClearWorldY =
+      this.camY - Math.max(40, viewportHeight * 0.48 - 208) * invZoom;
+    const stopY = state.hoverslamStopPinY;
+    const canStop = state.hoverslamCanStop;
+
+    const isDanger = !canStop || stopY === null || stopY < -4;
+    const isBurnNow = !isDanger && stopY >= -4 && stopY <= 20;
+
+    // Anchor along catch arm center axis (x = 0); clamp above bottom HUD console if below viewport fold
+    const rawTargetY = stopY !== null ? Math.max(GROUND_Y + 4, stopY) : 0;
+    const barY = Math.max(hudClearWorldY, rawTargetY);
+    const halfBarWidth = Math.max(18, 42 * invZoom);
 
     ctx.save();
-    ctx.strokeStyle = isDanger
-      ? 'rgba(239, 68, 68, 0.85)'
-      : isNominal
-        ? 'rgba(16, 185, 129, 0.9)'
-        : 'rgba(56, 189, 248, 0.65)';
-    ctx.lineWidth = Math.max(0.4, 1.5 / this.camZoom);
-    ctx.setLineDash([3 / this.camZoom, 4 / this.camZoom]);
 
-    const xCenter = Math.abs(shipX) < 120 ? 0 : shipX;
+    if (isBurnNow) {
+      // Green glowing horizontal target bar
+      ctx.strokeStyle = 'rgba(16, 185, 129, 0.32)';
+      ctx.lineWidth = 7 * invZoom;
+      ctx.beginPath();
+      ctx.moveTo(-halfBarWidth, barY);
+      ctx.lineTo(halfBarWidth, barY);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 2.4 * invZoom;
+      ctx.beginPath();
+      ctx.moveTo(-halfBarWidth, barY);
+      ctx.lineTo(halfBarWidth, barY);
+      ctx.stroke();
+    } else if (isDanger) {
+      ctx.strokeStyle = 'rgba(239, 68, 68, 0.92)';
+      ctx.lineWidth = 2.4 * invZoom;
+      ctx.beginPath();
+      ctx.moveTo(-halfBarWidth, barY);
+      ctx.lineTo(halfBarWidth, barY);
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
+      ctx.lineWidth = 1.8 * invZoom;
+      ctx.setLineDash([5 * invZoom, 4 * invZoom]);
+      ctx.beginPath();
+      ctx.moveTo(-halfBarWidth, barY);
+      ctx.lineTo(halfBarWidth, barY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // End ticks for [--- BURN TARGET ---] framing
+    const tickH = 5 * invZoom;
+    ctx.strokeStyle = isDanger ? '#ef4444' : isBurnNow ? '#10b981' : '#38bdf8';
+    ctx.lineWidth = 2 * invZoom;
     ctx.beginPath();
-    ctx.moveTo(xCenter - 16, clampedY);
-    ctx.lineTo(xCenter + 16, clampedY);
+    ctx.moveTo(-halfBarWidth, barY - tickH);
+    ctx.lineTo(-halfBarWidth, barY + tickH);
+    ctx.moveTo(halfBarWidth, barY - tickH);
+    ctx.lineTo(halfBarWidth, barY + tickH);
     ctx.stroke();
-    ctx.setLineDash([]);
+
+    // Screen-readable upright text label centered above the horizontal target bar
+    ctx.save();
+    ctx.translate(0, barY + 12 * invZoom);
+    ctx.scale(invZoom, -invZoom);
+    ctx.font = '700 12px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+
+    if (isBurnNow) {
+      const blinkAlpha = Math.sin(this.timeAccum * 12) >= -0.25 ? 1 : 0.25;
+      ctx.fillStyle = `rgba(52, 211, 153, ${blinkAlpha})`;
+      ctx.fillText(t.canvas.burnNow(Math.round(stopY)), 0, 0);
+    } else if (isDanger) {
+      ctx.fillStyle = '#f87171';
+      const detail =
+        !canStop || stopY === null
+          ? t.canvas.dangerNoDecel
+          : `${Math.round(stopY)}m`;
+      ctx.fillText(t.canvas.dangerPullUp(detail), 0, 0);
+    } else {
+      ctx.fillStyle = '#7dd3fc';
+      ctx.fillText(t.canvas.burnTarget(Math.round(stopY!)), 0, 0);
+    }
+    ctx.restore();
+
     ctx.restore();
   }
 
@@ -915,8 +1021,10 @@ export class GameCanvasRenderer {
     width: number,
     height: number,
     state: RocketState,
-    isDemo: boolean
+    isDemo: boolean,
+    locale: Locale
   ): void {
+    const t = getTranslations(locale);
     // Project catch origin (0, 0) to screen pixels
     const screenX = width * 0.5 + (0 - this.camX) * this.camZoom;
     const screenY = height * 0.52 - (0 - this.camY) * this.camZoom;
@@ -958,11 +1066,11 @@ export class GameCanvasRenderer {
     ctx.font = '600 11px "JetBrains Mono", monospace';
     ctx.fillStyle = '#a7f3d0';
     ctx.textAlign = 'center';
-    const label =
+    const formattedDist =
       distM >= 1000
-        ? `LZ ${(distM / 1000).toFixed(1)} km`
-        : `LZ ${Math.round(distM)} m`;
-    ctx.fillText(label, 0, 22);
+        ? `${(distM / 1000).toFixed(1)} km`
+        : `${Math.round(distM)} m`;
+    ctx.fillText(t.canvas.lzDistance(formattedDist), 0, 22);
     ctx.restore();
   }
 }

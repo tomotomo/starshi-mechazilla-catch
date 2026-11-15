@@ -1,5 +1,22 @@
 export type DifficultyId = 'easy' | 'normal' | 'hard' | 'extreme';
 
+export type AssistMode = 'realistic' | 'assisted';
+
+export interface AssistModeConfig {
+  id: AssistMode;
+  label: string;
+  shortLabel: string;
+  fuelFactor: number;
+  fuelFullScoreRatio: number;
+  modeMultiplier: number;
+  catchToleranceX: number;
+  catchToleranceY: number;
+  catchMaxVy: number;
+  catchMaxVx: number;
+  catchMaxThetaDeg: number;
+  catchMaxOmegaDeg: number;
+}
+
 export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover';
 
 export type EngineCount = 1 | 2 | 3 | 6;
@@ -36,7 +53,10 @@ export interface RocketState {
   ay: number;            // [m/s^2] non-gravitational felt acceleration y
   gForce: number;        // [G] felt acceleration / g0
   dynamicPressureKpa: number; // [kPa]
-  hoverslamStopPinY: number | null; // Estimated catch-pin Y when stopping with 3 engines
+  hoverslamStopPinY: number | null; // Estimated catch-pin Y when stopping with selectedEngines
+  hoverslamCanStop: boolean; // False when selectedEngines net deceleration <= 0 or no fuel
+  hoverslamStopPinY3: number | null; // Estimated catch-pin Y when stopping with 3 engines
+  hoverslam3CanStop: boolean; // False when 3-engine net deceleration <= 0 or no fuel
 }
 
 export interface ControlInput {
@@ -66,7 +86,8 @@ export interface ScoreBreakdown {
   velocityScore: number; // max 4000
   fuelScore: number;     // max 3000
   baseScore: number;     // max 10000
-  multiplier: number;
+  multiplier: number;    // stage multiplier
+  modeMultiplier: number; // realistic: 1.0, assisted: 0.7
   totalScore: number;
   distanceErrorM: number;
   catchSpeedMs: number;
@@ -90,6 +111,8 @@ export interface DemoGuidanceOutput {
 
 export interface GameResult {
   mode: FlightMode;
+  assistMode: AssistMode;
+  initialFuelKg: number;
   outcome: OutcomeKind;
   success: boolean;
   reason: string;

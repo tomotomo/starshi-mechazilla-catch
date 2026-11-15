@@ -1,10 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, Download, RotateCcw, ArrowLeft, Rocket } from 'lucide-react';
 import { GROUND_Y, TOWER_TOP_Y, TOWER_X } from '../game/constants';
+import {
+  getAssistModeLabel,
+  getStageLocalized,
+  getTranslations,
+  type Locale,
+} from '../game/i18n';
 import type { GameResult, TelemetryFrame } from '../game/types';
 
 export interface DebriefModalProps {
   result: GameResult;
+  locale: Locale;
   onRetry: () => void;
   onPlayManual?: () => void;
   onMissionSelect: () => void;
@@ -26,58 +33,66 @@ interface SeriesMeta {
   format: (v: number) => string;
 }
 
-const SERIES_LIST: SeriesMeta[] = [
-  {
-    key: 'altitude',
-    label: '高度 (Pin Y)',
-    unit: 'm',
-    color: '#38bdf8',
-    format: (v) => `${Math.round(v).toLocaleString()} m`,
-  },
-  {
-    key: 'velY',
-    label: '垂直速度 Vy',
-    unit: 'm/s',
-    color: '#f59e0b',
-    format: (v) => `${v.toFixed(1)} m/s`,
-  },
-  {
-    key: 'velX',
-    label: '水平速度 Vx',
-    unit: 'm/s',
-    color: '#a78bfa',
-    format: (v) => `${v.toFixed(1)} m/s`,
-  },
-  {
-    key: 'fuelPct',
-    label: '残燃料',
-    unit: '%',
-    color: '#10b981',
-    format: (v) => `${v.toFixed(1)}%`,
-  },
-  {
-    key: 'activeEngines',
-    label: '稼働基数',
-    unit: 'eng',
-    color: '#ef4444',
-    format: (v) => `${Math.round(v)} 基`,
-  },
-  {
-    key: 'gForce',
-    label: '加速度',
-    unit: 'G',
-    color: '#f472b6',
-    format: (v) => `${v.toFixed(2)} G`,
-  },
-];
-
 export const DebriefModal: React.FC<DebriefModalProps> = ({
   result,
+  locale,
   onRetry,
   onPlayManual,
   onMissionSelect,
 }) => {
+  const t = getTranslations(locale);
+  const stageCopy = getStageLocalized(result.stage.id, locale);
+  const modeLabel = getAssistModeLabel(result.assistMode, locale);
   const isDemo = result.mode === 'demo';
+
+  const seriesList = useMemo<SeriesMeta[]>(
+    () => [
+      {
+        key: 'altitude',
+        label: t.debrief.series.altitude,
+        unit: 'm',
+        color: '#38bdf8',
+        format: (v) => `${Math.round(v).toLocaleString()} m`,
+      },
+      {
+        key: 'velY',
+        label: t.debrief.series.velY,
+        unit: 'm/s',
+        color: '#f59e0b',
+        format: (v) => `${v.toFixed(1)} m/s`,
+      },
+      {
+        key: 'velX',
+        label: t.debrief.series.velX,
+        unit: 'm/s',
+        color: '#a78bfa',
+        format: (v) => `${v.toFixed(1)} m/s`,
+      },
+      {
+        key: 'fuelPct',
+        label: t.debrief.series.fuelPct,
+        unit: '%',
+        color: '#10b981',
+        format: (v) => `${v.toFixed(1)}%`,
+      },
+      {
+        key: 'activeEngines',
+        label: t.debrief.series.activeEngines,
+        unit: 'eng',
+        color: '#ef4444',
+        format: (v) => t.common.engineUnit(Math.round(v)),
+      },
+      {
+        key: 'gForce',
+        label: t.debrief.series.gForce,
+        unit: 'G',
+        color: '#f472b6',
+        format: (v) => `${v.toFixed(2)} G`,
+      },
+    ],
+    [t]
+  );
+
   const [enabledSeries, setEnabledSeries] = useState<Record<SeriesKey, boolean>>({
     altitude: true,
     velY: true,
@@ -106,7 +121,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
     };
     if (frames.length === 0) return ranges;
 
-    for (const meta of SERIES_LIST) {
+    for (const meta of seriesList) {
       if (meta.key === 'fuelPct') {
         ranges.fuelPct = { min: 0, max: 100 };
         continue;
@@ -136,7 +151,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
       ranges[meta.key] = { min, max };
     }
     return ranges;
-  }, [frames]);
+  }, [frames, seriesList]);
 
   const toggleSeries = (key: SeriesKey) => {
     setEnabledSeries((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -193,7 +208,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
       ctx.fillStyle = '#64748b';
       ctx.font = '12px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('No telemetry samples recorded', width / 2, height / 2);
+      ctx.fillText(t.debrief.noSamples, width / 2, height / 2);
       return;
     }
 
@@ -219,7 +234,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
     };
 
     // Draw each enabled series line
-    for (const meta of SERIES_LIST) {
+    for (const meta of seriesList) {
       if (!enabledSeries[meta.key]) continue;
       ctx.save();
       ctx.strokeStyle = meta.color;
@@ -257,7 +272,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
       ctx.stroke();
       ctx.setLineDash([]);
 
-      for (const meta of SERIES_LIST) {
+      for (const meta of seriesList) {
         if (!enabledSeries[meta.key]) continue;
         const { x, y } = getPointXY(hoverIndex, meta.key);
         ctx.fillStyle = meta.color;
@@ -270,7 +285,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
       }
       ctx.restore();
     }
-  }, [frames, enabledSeries, hoverIndex, seriesRanges]);
+  }, [frames, enabledSeries, hoverIndex, seriesRanges, seriesList, t.debrief.noSamples]);
 
   // Draw 2D Spatial Trajectory Map (Horizontal X vs Altitude Y)
   useEffect(() => {
@@ -451,6 +466,8 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
     const payload = JSON.stringify(
       {
         stage: result.stage.id,
+        assistMode: result.assistMode,
+        mode: result.mode,
         outcome: result.outcome,
         reason: result.reason,
         score: result.score,
@@ -482,7 +499,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Flight Debriefing"
+      aria-label={t.debrief.dialogAria}
       className="fixed inset-0 bg-[#05080F]/88 flex items-center justify-center p-4 z-40"
     >
       <div className="w-full max-w-5xl max-h-[92vh] overflow-y-auto bg-[#0B101B] border border-slate-700/80 rounded-xl p-5 md:p-6 text-slate-100">
@@ -496,20 +513,25 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
         >
           <div>
             <div className="text-xs font-mono-tabular text-slate-300">
-              {result.stage.name} ·{' '}
-              {isDemo
-                ? 'お手本飛行完了（オートパイロット実演）'
-                : result.stage.subtitle}{' '}
-              · Flight Time {result.flightDuration.toFixed(1)}s
+              {stageCopy.name} ·{' '}
+              <span
+                className={
+                  result.assistMode === 'assisted'
+                    ? 'text-emerald-300 font-semibold'
+                    : 'text-cyan-300 font-semibold'
+                }
+              >
+                {modeLabel}
+              </span>{' '}
+              · {isDemo ? t.debrief.demoCompleted : stageCopy.subtitle} ·{' '}
+              {t.debrief.flightTime} {result.flightDuration.toFixed(1)}s
             </div>
             <h2
               className={`font-display text-2xl md:text-3xl font-bold tracking-tight mt-0.5 ${
                 result.success ? 'text-emerald-300' : 'text-red-300'
               }`}
             >
-              {result.success
-                ? 'MECHAZILLA HAS CAUGHT THE BOOSTER!'
-                : 'RUD — Rapid Unscheduled Disassembly'}
+              {result.success ? t.debrief.successTitle : t.debrief.failTitle}
             </h2>
             <p className="text-sm text-slate-200 mt-1">{result.reason}</p>
           </div>
@@ -517,7 +539,9 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
           {result.score ? (
             <div className="text-right">
               <div className="text-xs font-mono-tabular text-emerald-300/90">
-                TOTAL SCORE ({result.score.multiplier.toFixed(1)}×)
+                {t.debrief.totalScore} ({t.debrief.stageLabel}{' '}
+                {result.score.multiplier.toFixed(1)}× · {t.debrief.modeLabel}{' '}
+                {result.score.modeMultiplier.toFixed(1)}×)
               </div>
               <div className="font-mono-tabular text-3xl md:text-4xl font-bold text-slate-50">
                 {result.score.totalScore.toLocaleString()}
@@ -525,7 +549,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
             </div>
           ) : (
             <div className="text-right font-mono-tabular">
-              <div className="text-xs text-red-300">IMPACT SPEED</div>
+              <div className="text-xs text-red-300">{t.debrief.impactSpeed}</div>
               <div className="text-2xl font-bold text-slate-50">
                 {result.impactSpeed.toFixed(1)} m/s
               </div>
@@ -538,34 +562,35 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
           {result.score ? (
             <>
               <div className="bg-[#070B14] border border-slate-800 rounded-lg p-3">
-                <div className="text-[11px] text-slate-400">位置精度 (MAX 3,000)</div>
+                <div className="text-[11px] text-slate-400">{t.debrief.posAccuracy}</div>
                 <div className="text-xl font-semibold text-cyan-300 mt-0.5">
                   {result.score.positionScore.toLocaleString()}
                 </div>
                 <div className="text-[11px] text-slate-400 mt-0.5">
-                  誤差 {result.score.distanceErrorM.toFixed(2)} m
+                  {t.debrief.errorLabel} {result.score.distanceErrorM.toFixed(2)} m
                 </div>
               </div>
               <div className="bg-[#070B14] border border-slate-800 rounded-lg p-3">
-                <div className="text-[11px] text-slate-400">速度・姿勢 (MAX 4,000)</div>
+                <div className="text-[11px] text-slate-400">{t.debrief.velAttitude}</div>
                 <div className="text-xl font-semibold text-emerald-300 mt-0.5">
                   {result.score.velocityScore.toLocaleString()}
                 </div>
                 <div className="text-[11px] text-slate-400 mt-0.5">
-                  {result.score.catchSpeedMs.toFixed(2)} m/s · {result.score.pitchErrorDeg.toFixed(1)}°
+                  {result.score.catchSpeedMs.toFixed(2)} m/s ·{' '}
+                  {result.score.pitchErrorDeg.toFixed(1)}°
                 </div>
               </div>
               <div className="bg-[#070B14] border border-slate-800 rounded-lg p-3">
-                <div className="text-[11px] text-slate-400">残燃料効率 (MAX 3,000)</div>
+                <div className="text-[11px] text-slate-400">{t.debrief.fuelEfficiency}</div>
                 <div className="text-xl font-semibold text-amber-300 mt-0.5">
                   {result.score.fuelScore.toLocaleString()}
                 </div>
                 <div className="text-[11px] text-slate-400 mt-0.5">
-                  残量 {result.score.remainingFuelPct.toFixed(1)}%
+                  {t.debrief.remainingLabel} {result.score.remainingFuelPct.toFixed(1)}%
                 </div>
               </div>
               <div className="bg-[#070B14] border border-slate-800 rounded-lg p-3">
-                <div className="text-[11px] text-slate-400">最大負荷 (MAX-G / Q)</div>
+                <div className="text-[11px] text-slate-400">{t.debrief.maxLoad}</div>
                 <div className="text-xl font-semibold text-slate-100 mt-0.5">
                   {result.maxGForce.toFixed(1)} G
                 </div>
@@ -577,27 +602,27 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
           ) : (
             <>
               <div className="bg-[#070B14] border border-slate-800 rounded-lg p-3">
-                <div className="text-[11px] text-slate-400">最終ピン誤差 (ΔX, ΔY)</div>
+                <div className="text-[11px] text-slate-400">{t.debrief.finalPinOffset}</div>
                 <div className="text-base font-semibold text-slate-100 mt-0.5">
                   {result.pinDeltaX >= 0 ? '+' : ''}
                   {result.pinDeltaX.toFixed(1)}m / {result.pinDeltaY.toFixed(1)}m
                 </div>
               </div>
               <div className="bg-[#070B14] border border-slate-800 rounded-lg p-3">
-                <div className="text-[11px] text-slate-400">最終残燃料</div>
+                <div className="text-[11px] text-slate-400">{t.debrief.finalFuel}</div>
                 <div className="text-base font-semibold text-amber-300 mt-0.5">
                   {result.finalFrame.fuelPct.toFixed(1)}% (
                   {Math.round(result.finalFrame.fuelMass).toLocaleString()} kg)
                 </div>
               </div>
               <div className="bg-[#070B14] border border-slate-800 rounded-lg p-3">
-                <div className="text-[11px] text-slate-400">最大加速度</div>
+                <div className="text-[11px] text-slate-400">{t.debrief.maxG}</div>
                 <div className="text-base font-semibold text-slate-100 mt-0.5">
                   {result.maxGForce.toFixed(1)} G
                 </div>
               </div>
               <div className="bg-[#070B14] border border-slate-800 rounded-lg p-3">
-                <div className="text-[11px] text-slate-400">最大動圧 (Max-Q)</div>
+                <div className="text-[11px] text-slate-400">{t.debrief.maxQ}</div>
                 <div className="text-base font-semibold text-slate-100 mt-0.5">
                   {result.maxDynamicPressureKpa.toFixed(1)} kPa
                 </div>
@@ -613,14 +638,12 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
               <div>
                 <h3 className="font-display text-sm font-semibold text-slate-100">
-                  Flight Telemetry Graph
+                  {t.debrief.telemetryTitle}
                 </h3>
-                <p className="text-[11px] text-slate-400">
-                  グラフ上をマウス移動で時刻スクラブ確認（0.1s サンプリング）
-                </p>
+                <p className="text-[11px] text-slate-400">{t.debrief.telemetrySub}</p>
               </div>
               <div className="flex flex-wrap items-center gap-1.5">
-                {SERIES_LIST.map((meta) => {
+                {seriesList.map((meta) => {
                   const active = enabledSeries[meta.key];
                   return (
                     <button
@@ -662,7 +685,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
                   <span className="text-slate-100 font-semibold">
                     T+{hoveredFrame.time.toFixed(1)}s
                   </span>
-                  {SERIES_LIST.filter((m) => enabledSeries[m.key]).map((meta) => (
+                  {seriesList.filter((m) => enabledSeries[m.key]).map((meta) => (
                     <span key={meta.key} style={{ color: meta.color }}>
                       {meta.label}: {meta.format(hoveredFrame[meta.key])}
                     </span>
@@ -670,7 +693,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
                 </>
               ) : (
                 <span className="text-slate-500">
-                  Samples: {frames.length} pts · Hover chart to inspect exact telemetry
+                  {t.debrief.samplesCount(frames.length)}
                 </span>
               )}
             </div>
@@ -680,16 +703,16 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
           <div className="bg-[#070B14] border border-slate-800 rounded-lg p-3.5 flex flex-col">
             <div className="flex items-center justify-between mb-2.5">
               <h3 className="font-display text-sm font-semibold text-slate-100">
-                2D Trajectory Map
+                {t.debrief.trajectoryTitle}
               </h3>
               <div className="flex items-center gap-2.5 text-[10px] font-mono-tabular text-slate-400">
                 <span className="flex items-center gap-1">
                   <span className="w-2.5 h-0.5 bg-red-500 inline-block" />
-                  Burn
+                  {t.debrief.burnLegend}
                 </span>
                 <span className="flex items-center gap-1">
                   <span className="w-2.5 h-0.5 bg-sky-400 inline-block" />
-                  Coast
+                  {t.debrief.coastLegend}
                 </span>
               </div>
             </div>
@@ -709,7 +732,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
               className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs font-mono-tabular text-slate-200 transition-colors cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Download CSV</span>
+              <span>{t.debrief.downloadCsv}</span>
             </button>
             <button
               type="button"
@@ -719,12 +742,12 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
               {copiedJson ? (
                 <>
                   <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-emerald-300">Copied JSON</span>
+                  <span className="text-emerald-300">{t.debrief.copiedJson}</span>
                 </>
               ) : (
                 <>
                   <Copy className="w-3.5 h-3.5" />
-                  <span>Copy JSON</span>
+                  <span>{t.debrief.copyJson}</span>
                 </>
               )}
             </button>
@@ -737,7 +760,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
               className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg bg-transparent hover:bg-slate-800/70 border border-slate-700 text-sm font-medium text-slate-300 transition-colors cursor-pointer whitespace-nowrap"
             >
               <ArrowLeft className="w-4 h-4" />
-              <span>Mission Select</span>
+              <span>{t.debrief.missionSelect}</span>
             </button>
             {isDemo ? (
               <>
@@ -747,7 +770,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
                   className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-sm font-medium text-slate-100 transition-colors cursor-pointer whitespace-nowrap"
                 >
                   <RotateCcw className="w-4 h-4" />
-                  <span>もう一度お手本</span>
+                  <span>{t.debrief.watchDemoAgain}</span>
                 </button>
                 <button
                   type="button"
@@ -757,7 +780,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
                   className="flex items-center gap-1.5 px-5 py-2.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-display font-bold text-sm transition-colors cursor-pointer whitespace-nowrap"
                 >
                   <Rocket className="w-4 h-4" />
-                  <span>自分で挑戦</span>
+                  <span>{t.debrief.tryYourself}</span>
                 </button>
               </>
             ) : (
@@ -768,7 +791,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
                 className="flex items-center gap-1.5 px-5 py-2.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-display font-bold text-sm transition-colors cursor-pointer whitespace-nowrap"
               >
                 <RotateCcw className="w-4 h-4" />
-                <span>Retry Mission</span>
+                <span>{t.debrief.retryMission}</span>
               </button>
             )}
           </div>
