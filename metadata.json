@@ -1,0 +1,6 @@
+{
+  "name": "Starship Mechazilla Catch",
+  "description": "2D rigid-body aerospace simulation where you pilot Starship through atmospheric reentry and perform a precision Mechazilla tower chopstick catch.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
