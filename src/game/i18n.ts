@@ -108,9 +108,9 @@ const STAGE_COPY: Record<Locale, Record<DifficultyId, StageLocalizedCopy>> = {
     },
     extreme: {
       name: '地球低軌道 (LEO)',
-      subtitle: '大気圏再突入',
+      subtitle: '軌道離脱バーン & 再突入',
       strategyTip:
-        '超高高度からの大気圏再突入。6基のエントリーバーンで熱負荷と速度を抑え、空力ブレーキを併用します。',
+        '高度215km・vy=0の逆向き軌道から開始。まず6基で水平速度 vx +1,460 m/s（Δv 約-540 m/s・約5秒）まで逆噴射して軌道離脱し、機首を +55°〜+75° へ起こしてプラズマ再突入で減速・着陸します。',
     },
   },
   en: {
@@ -134,9 +134,9 @@ const STAGE_COPY: Record<Locale, Record<DifficultyId, StageLocalizedCopy>> = {
     },
     extreme: {
       name: 'Low Earth Orbit (LEO)',
-      subtitle: 'Orbital Reentry',
+      subtitle: 'Orbital Deorbit & Reentry',
       strategyTip:
-        'High-energy atmospheric reentry. Fire a 6-engine entry burn to shed horizontal velocity and heating before aero braking.',
+        'Starts at 215 km (vy=0) facing retrograde (-90°). First burn 6 ENG retrograde down to vx +1,460 m/s (Δv ~540 m/s, ~5s burn), then pitch nose +55° to +75° for plasma reentry before Hoverslam.',
     },
   },
 };
@@ -226,6 +226,12 @@ export interface TranslationDict {
   };
   hud: {
     demoBadgeSuffix: string;
+    orbitalCoast: string;
+    reentryPlasma: string;
+    deorbitBurnTitle: string;
+    deorbitBurnGuide: (targetVx: number, dvLeft: number) => string;
+    deorbitDoneTitle: string;
+    deorbitDoneGuide: (currentVx: number) => string;
     warpTitle: string;
     muteAria: string;
     unmuteAria: string;
@@ -358,7 +364,16 @@ export const TRANSLATIONS: Record<Locale, TranslationDict> = {
     },
     hud: {
       demoBadgeSuffix: 'お手本再生中（観戦専用）',
-      warpTitle: 'タイムワープ [T] — 高度 2,000m 以上・エンジンOFF時のみ使用可能',
+      orbitalCoast: '軌道上 (離脱バーン待機)',
+      reentryPlasma: '再突入プラズマ',
+      deorbitBurnTitle: '軌道離脱バーン目標',
+      deorbitBurnGuide: (targetVx, dvLeft) =>
+        `6基 [4] を選択し -90° 姿勢のまま 目標 VX +${targetVx.toLocaleString()} m/s まで逆噴射（残り減速量 -${dvLeft} m/s · 約5秒でカット）`,
+      deorbitDoneTitle: '軌道離脱バーン完了',
+      deorbitDoneGuide: (currentVx) =>
+        `現在 VX +${currentVx.toLocaleString()} m/s — エンジンOFFのまま D キーで機首を +55°〜+75°（黒耐熱タイル下向き）へ起こし、[T] でタイムワープ`,
+      warpTitle:
+        'タイムワープ [T] (1×/5×/10×/20×) — 高度 2,000m 以上・エンジンOFF時のみ使用可能',
       muteAria: '音声をミュート',
       unmuteAria: '音声ミュートを解除',
       retryTitle: 'リトライ [R]',
@@ -488,7 +503,16 @@ export const TRANSLATIONS: Record<Locale, TranslationDict> = {
     },
     hud: {
       demoBadgeSuffix: 'Autopilot Demo (Watch Only)',
-      warpTitle: 'Time Warp [T] — Available above 2,000 m with engines OFF',
+      orbitalCoast: 'ORBITAL (DEORBIT READY)',
+      reentryPlasma: 'REENTRY PLASMA',
+      deorbitBurnTitle: 'DEORBIT BURN TARGET',
+      deorbitBurnGuide: (targetVx, dvLeft) =>
+        `Select 6 ENG [4] at -90° and burn retrograde to VX +${targetVx.toLocaleString()} m/s (Δv left: -${dvLeft} m/s · ~5s burn, then cut)`,
+      deorbitDoneTitle: 'DEORBIT BURN COMPLETE',
+      deorbitDoneGuide: (currentVx) =>
+        `VX +${currentVx.toLocaleString()} m/s locked — Cut thrust, hold D to pitch nose +55° to +75° (heatshield down), and warp [T] to reentry`,
+      warpTitle:
+        'Time Warp [T] (1×/5×/10×/20×) — Available above 2,000 m with engines OFF',
       muteAria: 'Mute Audio',
       unmuteAria: 'Unmute Audio',
       retryTitle: 'Retry [R]',

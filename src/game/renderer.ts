@@ -8,7 +8,11 @@ import {
   TOWER_X,
 } from './constants';
 import { getTranslations, type Locale } from './i18n';
-import { getBottomPosition, getCatchPinPosition } from './physics';
+import {
+  computeReentryPlasmaIntensity,
+  getBottomPosition,
+  getCatchPinPosition,
+} from './physics';
 import type { AssistMode, OutcomeKind, RocketState } from './types';
 
 type ParticleKind = 'exhaust' | 'dust' | 'plasma' | 'fire' | 'debris';
@@ -200,20 +204,25 @@ export class GameCanvasRenderer {
       }
     }
 
-    // Reentry plasma particles during high dynamic pressure & speed
+    // Reentry plasma particles driven by convective shock-heating intensity (~100km -> 25km)
     const speed = Math.hypot(state.vx, state.vy);
-    if (state.dynamicPressureKpa > 5 && speed > 360 && !outcome) {
-      const intensity = Math.min(1, (state.dynamicPressureKpa - 5) / 28);
-      const count = Math.ceil(intensity * 3);
+    const plasmaIntensity = computeReentryPlasmaIntensity(state.y, speed);
+    if (plasmaIntensity > 0.03 && !outcome) {
+      const count = Math.max(1, Math.ceil(plasmaIntensity * 4));
+      const vHatX = state.vx / Math.max(1, speed);
+      const vHatY = state.vy / Math.max(1, speed);
       for (let i = 0; i < count; i++) {
+        const alongBody = (Math.random() - 0.5) * 56;
+        const bodyDirX = Math.sin(state.theta);
+        const bodyDirY = Math.cos(state.theta);
         this.spawnParticle(
           'plasma',
-          state.x + (Math.random() - 0.5) * 14,
-          state.y + (Math.random() - 0.5) * 32,
-          -state.vx * 0.25 + (Math.random() - 0.5) * 30,
-          -state.vy * 0.25 + (Math.random() - 0.5) * 30,
-          0.18 + Math.random() * 0.18,
-          2.2 + Math.random() * 4.5
+          state.x + bodyDirX * alongBody + vHatX * 6 + (Math.random() - 0.5) * 6,
+          state.y + bodyDirY * alongBody + vHatY * 6 + (Math.random() - 0.5) * 6,
+          -state.vx * 0.22 + (Math.random() - 0.5) * 42,
+          -state.vy * 0.22 + (Math.random() - 0.5) * 42,
+          0.16 + Math.random() * 0.22,
+          2.2 + plasmaIntensity * 3.8 + Math.random() * 2.5
         );
       }
     }
@@ -751,15 +760,11 @@ export class GameCanvasRenderer {
       this.drawMethanePlume(ctx, state);
     }
 
-    // 2. Reentry plasma shockwave halo when dynamic pressure is high
+    // 2. Windward reentry bow-shock plasma sheath (~100km -> 25km hypersonic entry)
     const speed = Math.hypot(state.vx, state.vy);
-    if (state.dynamicPressureKpa > 6 && speed > 360) {
-      const heatAlpha = Math.min(0.65, (state.dynamicPressureKpa - 6) / 30);
-      ctx.strokeStyle = `rgba(251, 146, 60, ${heatAlpha.toFixed(2)})`;
-      ctx.lineWidth = 2.2;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, halfD + 2.8, halfL + 2.5, 0, 0, Math.PI * 2);
-      ctx.stroke();
+    const plasmaIntensity = computeReentryPlasmaIntensity(state.y, speed);
+    if (plasmaIntensity > 0.02 && speed > 1) {
+      this.drawReentryPlasma(ctx, state, plasmaIntensity, halfD, halfL);
     }
 
     // 3. Aft & Forward Aerodynamic Flaps
@@ -868,6 +873,74 @@ export class GameCanvasRenderer {
     ctx.restore();
   }
 
+  private drawReentryPlasma(
+    ctx: CanvasRenderingContext2D,
+    state: RocketState,
+    intensity: number,
+    halfD: number,
+    halfL: number
+  ): void {
+    // Transform world velocity vector into ship local coords (+x = TPS heatshield, +y = nose)
+    const cosT = Math.cos(state.theta);
+    const sinT = Math.sin(state.theta);
+    const vLocalX = state.vx * cosT - state.vy * sinT;
+    const vLocalY = state.vx * sinT + state.vy * cosT;
+    const windAngle = Math.atan2(vLocalY, vLocalX);
+    const shimmer = 0.88 + 0.12 * Math.sin(this.timeAccum * 26);
+    const alpha = Math.min(1, intensity * shimmer);
+    const arcSpan = Math.PI * 0.58;
+
+    ctx.save();
+    ctx.lineCap = 'round';
+
+    // Outer violet-magenta ionized shock halo
+    ctx.strokeStyle = `rgba(217, 70, 239, ${(alpha * 0.42).toFixed(3)})`;
+    ctx.lineWidth = 5.5 + intensity * 4.5;
+    ctx.beginPath();
+    ctx.ellipse(
+      0,
+      0,
+      halfD + 4.4,
+      halfL + 4.0,
+      0,
+      windAngle - arcSpan,
+      windAngle + arcSpan
+    );
+    ctx.stroke();
+
+    // Mid orange-amber shock sheath
+    ctx.strokeStyle = `rgba(249, 115, 22, ${(alpha * 0.78).toFixed(3)})`;
+    ctx.lineWidth = 2.8 + intensity * 2.4;
+    ctx.beginPath();
+    ctx.ellipse(
+      0,
+      0,
+      halfD + 2.7,
+      halfL + 2.4,
+      0,
+      windAngle - arcSpan * 0.9,
+      windAngle + arcSpan * 0.9
+    );
+    ctx.stroke();
+
+    // Inner bright incandescent stagnation core
+    ctx.strokeStyle = `rgba(254, 240, 138, ${(alpha * 0.9).toFixed(3)})`;
+    ctx.lineWidth = 1.4 + intensity * 1.1;
+    ctx.beginPath();
+    ctx.ellipse(
+      0,
+      0,
+      halfD + 1.5,
+      halfL + 1.4,
+      0,
+      windAngle - arcSpan * 0.62,
+      windAngle + arcSpan * 0.62
+    );
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
   private drawMethanePlume(
     ctx: CanvasRenderingContext2D,
     state: RocketState
@@ -939,7 +1012,11 @@ export class GameCanvasRenderer {
       } else if (p.kind === 'dust') {
         ctx.fillStyle = `rgba(203, 213, 225, ${(life * 0.36).toFixed(3)})`;
       } else if (p.kind === 'plasma') {
-        ctx.fillStyle = `rgba(251, 146, 60, ${(life * 0.72).toFixed(3)})`;
+        if (life > 0.6) {
+          ctx.fillStyle = `rgba(253, 186, 116, ${(life * 0.85).toFixed(3)})`;
+        } else {
+          ctx.fillStyle = `rgba(232, 121, 249, ${(life * 0.65).toFixed(3)})`;
+        }
       } else if (p.kind === 'fire') {
         const g = Math.round(70 + life * 140);
         ctx.fillStyle = `rgba(255, ${g}, 20, ${(life * 0.85).toFixed(3)})`;

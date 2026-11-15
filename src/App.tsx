@@ -40,7 +40,10 @@ import type {
   RocketState,
   StageConfig,
   TelemetryFrame,
+  TimeWarpFactor,
 } from './game/types';
+
+const WARP_STEPS: TimeWarpFactor[] = [1, 5, 10, 20];
 
 function getStageById(id: DifficultyId): StageConfig {
   return STAGES.find((s) => s.id === id) ?? STAGES[0];
@@ -121,7 +124,7 @@ export default function App() {
   const [selectedStageId, setSelectedStageId] = useState<DifficultyId>(
     initialParams.stageId
   );
-  const [timeWarp, setTimeWarp] = useState<1 | 5>(1);
+  const [timeWarp, setTimeWarp] = useState<TimeWarpFactor>(1);
   const [muted, setMuted] = useState(false);
   const [hudRocket, setHudRocket] = useState<RocketState>(() =>
     createInitialRocketState(
@@ -151,7 +154,7 @@ export default function App() {
 
   const phaseRef = useRef<GamePhase>(phase);
   phaseRef.current = phase;
-  const timeWarpRef = useRef<1 | 5>(timeWarp);
+  const timeWarpRef = useRef<TimeWarpFactor>(timeWarp);
   timeWarpRef.current = timeWarp;
   const localeRef = useRef<Locale>(locale);
   localeRef.current = locale;
@@ -314,19 +317,24 @@ export default function App() {
     if (phaseRef.current !== 'playing' || simRef.current.outcome !== null) {
       return;
     }
-    if (timeWarpRef.current === 5) {
-      timeWarpRef.current = 1;
-      setTimeWarp(1);
-      soundRef.current?.playUiTick(440);
-      return;
-    }
     const eligible =
       simRef.current.rocket.y >= 2_000 && !simRef.current.input.throttleHold;
-    if (eligible) {
-      timeWarpRef.current = 5;
-      setTimeWarp(5);
-      soundRef.current?.playUiTick(740);
+    const current = timeWarpRef.current;
+
+    if (!eligible) {
+      if (current !== 1) {
+        timeWarpRef.current = 1;
+        setTimeWarp(1);
+        soundRef.current?.playUiTick(440);
+      }
+      return;
     }
+
+    const idx = WARP_STEPS.indexOf(current);
+    const nextWarp = WARP_STEPS[(idx + 1) % WARP_STEPS.length];
+    timeWarpRef.current = nextWarp;
+    setTimeWarp(nextWarp);
+    soundRef.current?.playUiTick(nextWarp === 1 ? 440 : 580 + nextWarp * 16);
   }, []);
 
   const handleToggleMute = useCallback(() => {
@@ -423,7 +431,7 @@ export default function App() {
         e.preventDefault();
         soundRef.current?.ensureInit();
         simRef.current.input.throttleHold = true;
-        if (timeWarpRef.current === 5) {
+        if (timeWarpRef.current > 1) {
           timeWarpRef.current = 1;
           setTimeWarp(1);
         }
@@ -566,14 +574,14 @@ export default function App() {
           if (sim.mode === 'demo') {
             const preGuidance = computeEasyDemoGuidance(sim.rocket, localeRef.current);
             if (
-              timeWarpRef.current === 5 &&
+              timeWarpRef.current > 1 &&
               (sim.rocket.y < 2_000 || preGuidance.input.throttleHold)
             ) {
               timeWarpRef.current = 1;
               setTimeWarp(1);
             }
           } else if (
-            timeWarpRef.current === 5 &&
+            timeWarpRef.current > 1 &&
             (sim.rocket.y < 2_000 || sim.input.throttleHold)
           ) {
             timeWarpRef.current = 1;
@@ -582,7 +590,7 @@ export default function App() {
 
           sim.accumulator += rawDt * timeWarpRef.current;
           let steps = 0;
-          const maxSteps = 32;
+          const maxSteps = 96;
 
           while (sim.accumulator >= FIXED_DT && steps < maxSteps) {
             sim.accumulator -= FIXED_DT;
@@ -612,7 +620,7 @@ export default function App() {
               sim.demoGuidance = guidance;
 
               if (
-                timeWarpRef.current === 5 &&
+                timeWarpRef.current > 1 &&
                 (sim.rocket.y < 2_000 || guidance.input.throttleHold)
               ) {
                 timeWarpRef.current = 1;

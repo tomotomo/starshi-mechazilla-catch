@@ -13,6 +13,7 @@ import {
   GRIDFIN_TORQUE_COEFF,
   GROUND_Y,
   MAX_GIMBAL_RAD,
+  ORBITAL_EFFECTIVE_RADIUS,
   R_CATCH_PIN,
   R_ENGINE,
   R_NOSE,
@@ -57,6 +58,21 @@ export function normalizeAngle(rad: number): number {
 export function atmosphericDensity(altitudeY: number): number {
   const effectiveAlt = Math.max(0, altitudeY - GROUND_Y);
   return RHO_0 * Math.exp(-effectiveAlt / SCALE_HEIGHT);
+}
+
+/**
+ * Computes normalized reentry bow-shock plasma intensity [0, 1] using a
+ * convective heat-flux proxy proportional to sqrt(rho) * v^3 so hypersonic
+ * upper-atmosphere ionization appears realistically from ~100 km down to ~25 km.
+ */
+export function computeReentryPlasmaIntensity(
+  altitudeY: number,
+  speed: number
+): number {
+  if (speed <= 360) return 0;
+  const rho = atmosphericDensity(altitudeY);
+  const heatFlux = Math.sqrt(rho / RHO_0) * Math.pow(speed / 1000, 3);
+  return Math.max(0, Math.min(1, (heatFlux - 0.014) / 0.24));
 }
 
 export function getCatchPinPosition(state: Pick<RocketState, 'x' | 'y' | 'theta'>): {
@@ -286,8 +302,15 @@ export function stepRocketPhysics(
   const axNonGrav = netNonGravFx / totalMass;
   const ayNonGrav = netNonGravFy / totalMass;
 
+  // Smooth orbital centrifugal relief for high horizontal speeds (vx > 380 m/s),
+  // preserving vy = 0 circular orbit equilibrium at 200km+ without affecting 3km/10km/50km stages.
+  const orbS = Math.max(0, Math.min(1, (Math.abs(prev.vx) - 380) / (650 - 380)));
+  const orbBlend = orbS * orbS * (3 - 2 * orbS);
+  const centrifugalAcc =
+    orbBlend * ((prev.vx * prev.vx) / ORBITAL_EFFECTIVE_RADIUS);
+
   const totalAx = axNonGrav;
-  const totalAy = ayNonGrav - G0;
+  const totalAy = ayNonGrav - G0 + centrifugalAcc;
   const alphaAng = totalTorque / inertia;
 
   const nextVx = prev.vx + totalAx * dt;

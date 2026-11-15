@@ -21,6 +21,8 @@ export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover';
 
 export type EngineCount = 1 | 2 | 3 | 6;
 
+export type TimeWarpFactor = 1 | 5 | 10 | 20;
+
 export interface StageConfig {
   id: DifficultyId;
   levelNumber: number;

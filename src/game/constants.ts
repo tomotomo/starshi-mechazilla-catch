@@ -16,6 +16,11 @@ export const ISP = 330; // [s]
 export const G0 = 9.80665; // [m/s^2]
 export const EXHAUST_VELOCITY = ISP * G0; // [m/s]
 
+// Orbital centrifugal relief scale (active smoothly at high orbital horizontal velocities)
+export const ORBITAL_CIRC_SPEED = 2_000; // [m/s] circular orbital speed at LEO start
+export const ORBITAL_EFFECTIVE_RADIUS = (ORBITAL_CIRC_SPEED * ORBITAL_CIRC_SPEED) / G0; // [m]
+export const LEO_DEORBIT_TARGET_VX = 1_460; // [m/s] target horizontal velocity after retrograde deorbit burn
+
 // Gimbal & aerodynamic control constants
 export const MAX_GIMBAL_DEG = 15;
 export const MAX_GIMBAL_RAD = (MAX_GIMBAL_DEG * Math.PI) / 180;
@@ -132,15 +137,16 @@ export const STAGES: StageConfig[] = [
     id: 'extreme',
     levelNumber: 4,
     name: '地球低軌道 (LEO)',
-    subtitle: 'Orbital Reentry',
-    initialY: 120_000,
-    initialX: -15_000,
-    initialVx: 1_200,
-    initialVy: -900,
-    initialThetaDeg: -75,
-    initialFuelKg: 56_500,
+    subtitle: '軌道離脱バーン & 再突入',
+    initialY: 215_000,
+    initialX: -425_000,
+    initialVx: 2_000,
+    initialVy: 0,
+    initialThetaDeg: -90,
+    initialFuelKg: 35_000,
     multiplier: 3.0,
-    strategyTip: '超高高度からの大気圏再突入。6基のエントリーバーンで熱負荷と速度を抑え、空力ブレーキを併用します。',
+    strategyTip:
+      '高度215km・vy=0の逆向き軌道から開始。まず6基で水平速度 vx +1,460 m/s（Δv 約-540 m/s・約5秒）まで逆噴射して軌道離脱し、機首を +55°〜+75° へ起こしてプラズマ再突入で減速・着陸します。',
   },
 ];
 

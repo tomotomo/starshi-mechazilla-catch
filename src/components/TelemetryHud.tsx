@@ -1,6 +1,11 @@
 import React from 'react';
 import { Pause, RotateCcw, Volume2, VolumeX, FastForward } from 'lucide-react';
-import { getAssistModeConfig, GROUND_Y, UNIT_THRUST } from '../game/constants';
+import {
+  getAssistModeConfig,
+  GROUND_Y,
+  LEO_DEORBIT_TARGET_VX,
+  UNIT_THRUST,
+} from '../game/constants';
 import {
   getAssistModeLabel,
   getStageLocalized,
@@ -8,6 +13,7 @@ import {
   type Locale,
 } from '../game/i18n';
 import {
+  computeReentryPlasmaIntensity,
   getCatchPinPosition,
   getEffectiveInitialFuelKg,
   radToDeg,
@@ -19,6 +25,7 @@ import type {
   FlightMode,
   RocketState,
   StageConfig,
+  TimeWarpFactor,
 } from '../game/types';
 
 export interface TelemetryHudProps {
@@ -28,7 +35,7 @@ export interface TelemetryHudProps {
   flightMode: FlightMode;
   locale: Locale;
   demoGuidance: DemoGuidanceOutput | null;
-  timeWarp: 1 | 5;
+  timeWarp: TimeWarpFactor;
   muted: boolean;
   onSelectEngines: (count: EngineCount) => void;
   onToggleWarp: () => void;
@@ -79,6 +86,16 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
       ? Math.max(0, Math.min(100, (state.fuelMass / effectiveFuelKg) * 100))
       : 0;
   const warpEligible = state.y >= 2_000 && !state.throttleOn;
+  const plasmaIntensity = computeReentryPlasmaIntensity(state.y, speed);
+  const isOrbitalCoast =
+    state.y >= 160_000 && Math.abs(state.vy) < 15 && state.vx >= 1_800;
+  const showLeoDeorbitCue =
+    stage.id === 'extreme' && !isDemo && state.y > 100_000;
+  const deorbitBurnComplete = state.vx <= LEO_DEORBIT_TARGET_VX + 20;
+  const deorbitDvRemaining = Math.max(
+    0,
+    Math.round(state.vx - LEO_DEORBIT_TARGET_VX)
+  );
 
   const fuelBarColor =
     fuelPct < 10
@@ -158,6 +175,18 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
                   >
                     {modeLabel}
                   </span>
+                  {plasmaIntensity >= 0.08 && (
+                    <span className="text-amber-300 font-semibold">
+                      {' '}
+                      · {t.hud.reentryPlasma}
+                    </span>
+                  )}
+                  {plasmaIntensity < 0.08 && isOrbitalCoast && (
+                    <span className="text-sky-300 font-semibold">
+                      {' '}
+                      · {t.hud.orbitalCoast}
+                    </span>
+                  )}
                 </span>
               )}
             </div>
@@ -176,7 +205,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
             }}
             title={t.hud.warpTitle}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-mono-tabular font-medium border transition-colors whitespace-nowrap shrink-0 ${
-              timeWarp === 5
+              timeWarp > 1
                 ? 'bg-amber-500/20 border-amber-400 text-amber-200'
                 : warpEligible
                   ? 'bg-slate-800/90 border-slate-600 text-slate-200 hover:border-cyan-400'
@@ -339,8 +368,37 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
         )}
       </div>
 
-      {/* Bottom Center: Optional Demo Autopilot Commentary + SpaceX-Inspired Telemetry Console */}
+      {/* Bottom Center: Optional Demo Commentary, LEO Deorbit Target Cue + Telemetry Console */}
       <div className="flex flex-col items-center gap-2">
+        {showLeoDeorbitCue && (
+          <div
+            data-testid="leo-deorbit-cue"
+            className={`pointer-events-auto w-full max-w-4xl bg-[#0B101B]/94 border rounded-xl px-4 py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
+              deorbitBurnComplete
+                ? 'border-emerald-500/45'
+                : 'border-sky-500/45'
+            }`}
+          >
+            <span
+              className={`font-display text-xs font-bold whitespace-nowrap shrink-0 ${
+                deorbitBurnComplete ? 'text-emerald-300' : 'text-sky-300'
+              }`}
+            >
+              {deorbitBurnComplete
+                ? t.hud.deorbitDoneTitle
+                : t.hud.deorbitBurnTitle}
+            </span>
+            <span className="font-mono-tabular text-xs text-slate-200 leading-snug">
+              {deorbitBurnComplete
+                ? t.hud.deorbitDoneGuide(Math.round(state.vx))
+                : t.hud.deorbitBurnGuide(
+                    LEO_DEORBIT_TARGET_VX,
+                    deorbitDvRemaining
+                  )}
+            </span>
+          </div>
+        )}
+
         {isDemo && demoGuidance && (
           <div
             data-testid="demo-hud-strip"

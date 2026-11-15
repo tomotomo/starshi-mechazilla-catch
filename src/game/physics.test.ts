@@ -6,6 +6,7 @@ import {
   FIXED_DT,
   G0,
   GROUND_Y,
+  LEO_DEORBIT_TARGET_VX,
   MAX_GIMBAL_DEG,
   STAGES,
   UNIT_THRUST,
@@ -14,6 +15,7 @@ import {
 import {
   atmosphericDensity,
   calculateScore,
+  computeReentryPlasmaIntensity,
   createInitialRocketState,
   degToRad,
   estimateHoverslamPrediction,
@@ -21,6 +23,7 @@ import {
   getCatchPinPosition,
   getEffectiveInitialFuelKg,
   interpolateRocketState,
+  normalizeAngle,
   radToDeg,
   stepRocketPhysics,
 } from './physics';
@@ -174,7 +177,8 @@ test('all 4 stages are physically winnable with remaining fuel margin (no imposs
     let s = createInitialRocketState(stage);
     let outcome = evaluateOutcome(s);
     let steps = 0;
-    const maxSteps = 60 * 300; // 5 min max flight
+    const maxSteps = 60 * 600; // 10 min max flight (supports long-range LEO reentry)
+    let deorbitBurnDone = stage.id !== 'extreme';
 
     while (!outcome.terminated && steps < maxSteps) {
       const pin = getCatchPinPosition(s);
@@ -190,17 +194,15 @@ test('all 4 stages are physically winnable with remaining fuel margin (no imposs
       let desiredThetaDeg = 0;
       let throttleHold = false;
 
-      // Ballistic time-to-ground estimate in thin upper air
-      const disc = s.vy * s.vy + 2 * G0 * Math.max(0, s.y);
-      const tBallistic = s.y > 0 ? (s.vy + Math.sqrt(disc)) / G0 : 0;
-      const tAeroEff = Math.min(Math.max(0, tBallistic), stage.id === 'extreme' ? 92 : 65);
-      const estImpactX = pin.x + s.vx * tAeroEff * 0.72;
-
-      if (stage.id === 'extreme' && s.y > 85_000 && s.vx > 152) {
-        // Horizontal entry burn to bring ballistic trajectory within aero-glide range
-        desiredThetaDeg = -88;
+      if (!deorbitBurnDone) {
+        // Short ~5s retrograde orbital deorbit burn at -90 deg
+        desiredThetaDeg = -90;
         s.selectedEngines = 6;
         throttleHold = true;
+        if (s.vx <= LEO_DEORBIT_TARGET_VX) {
+          deorbitBurnDone = true;
+          throttleHold = false;
+        }
       } else if (pin.y > Math.max(stopDist3 * 1.15 + 40, 180)) {
         // Aerodynamic glide / belly flop toward smooth glide slope west of tower
         const targetX = stage.id === 'hard'
@@ -215,13 +217,15 @@ test('all 4 stages are physically winnable with remaining fuel margin (no imposs
 
         if (stage.id === 'hard' && s.y > 4_000) {
           // Proper belly-flop with black TPS heatshield down (+90 deg):
-          // +55 deg pitches nose up-right to glide left (-x), +115 deg pitches nose down-right to glide right (+x)
           desiredThetaDeg = Math.max(55, Math.min(115, 90 + vxErr * 0.25));
         } else if (stage.id === 'hard') {
           desiredThetaDeg = Math.max(-35, Math.min(35, -vxErr * 1.2));
-        } else if (speed > 260 && s.y > 3_500) {
-          // LEO post-entry belly-flop around -90 deg
-          desiredThetaDeg = Math.max(-118, Math.min(-55, -90 + vxErr * 0.45));
+        } else if (stage.id === 'extreme' && s.y > 26_000 && speed > 380) {
+          // Nose-up TPS heatshield belly plasma reentry (+32..+82 deg)
+          desiredThetaDeg = Math.max(
+            32,
+            Math.min(82, 58 + (targetX - pin.x - s.vx * 35) * 0.002)
+          );
         } else {
           desiredThetaDeg = Math.max(-42, Math.min(42, -vxErr * 1.4));
         }
@@ -249,7 +253,7 @@ test('all 4 stages are physically winnable with remaining fuel margin (no imposs
       }
 
       // Critically damped PD attitude control (no bang-bang overshoot)
-      const thetaErr = degToRad(desiredThetaDeg) - s.theta;
+      const thetaErr = normalizeAngle(degToRad(desiredThetaDeg) - s.theta);
       const pdCmd = thetaErr * 3.5 - s.omega * 2.2;
 
       const input: ControlInput = {
@@ -587,8 +591,41 @@ test('interpolateRocketState eliminates LEO step-aliasing jitter and wraps angle
   const deltas = renderedX.slice(3).map((x, idx) => x - renderedX[idx + 2]);
   for (const dx of deltas) {
     assert.ok(
-      Math.abs(dx - 1200 * frameDt120Hz) < 0.2,
-      `Expected smooth ~10m per 120Hz frame in LEO, got dx=${dx.toFixed(3)}m`
+      Math.abs(dx - leoStage.initialVx * frameDt120Hz) < 0.2,
+      `Expected smooth ~${(leoStage.initialVx * frameDt120Hz).toFixed(1)}m per 120Hz frame in LEO, got dx=${dx.toFixed(3)}m`
     );
   }
+});
+
+test('LEO starts at 200km+ with vy=0 retrograde equilibrium and plasma triggers across 95km-35km reentry', () => {
+  const leoStage = STAGES.find((st) => st.id === 'extreme')!;
+  assert.ok(leoStage.initialY >= 200_000, 'LEO must start at >= 200 km');
+  assert.equal(leoStage.initialVy, 0, 'LEO must start with vy = 0');
+  assert.equal(leoStage.initialThetaDeg, -90, 'LEO must start facing retrograde (-90 deg)');
+
+  // Without a deorbit burn, circular centrifugal balance keeps vy ~ 0
+  let sOrb = createInitialRocketState(leoStage, 'realistic');
+  for (let i = 0; i < 600; i++) {
+    sOrb = stepRocketPhysics(sOrb, NO_INPUT, FIXED_DT);
+  }
+  assert.ok(Math.abs(sOrb.vy) < 0.05, `Expected vy near 0 in orbit, got ${sOrb.vy}`);
+  assert.ok(Math.abs(sOrb.y - leoStage.initialY) < 1, 'Expected orbital altitude hold without burn');
+
+  // After a short 5s retrograde burn, vehicle drops out of orbit
+  let sBurn = createInitialRocketState(leoStage, 'realistic');
+  sBurn.selectedEngines = 6;
+  for (let i = 0; i < 300; i++) {
+    sBurn = stepRocketPhysics(sBurn, { gimbalLeft: false, gimbalRight: false, throttleHold: true }, FIXED_DT);
+  }
+  assert.ok(sBurn.vx < leoStage.initialVx - 400, 'Retrograde burn should shed horizontal speed');
+  for (let i = 0; i < 600; i++) {
+    sBurn = stepRocketPhysics(sBurn, NO_INPUT, FIXED_DT);
+  }
+  assert.ok(sBurn.vy < -25, `Vehicle should descend after deorbit burn, got vy=${sBurn.vy}`);
+
+  // Plasma intensity stays 0 in orbital vacuum and subsonic flight, and lights up during 90km->40km reentry
+  assert.equal(computeReentryPlasmaIntensity(215_000, 2_000), 0);
+  assert.equal(computeReentryPlasmaIntensity(10_000, 260), 0);
+  assert.ok(computeReentryPlasmaIntensity(90_000, 1_850) > 0.03);
+  assert.ok(computeReentryPlasmaIntensity(50_000, 1_800) > 0.7);
 });
