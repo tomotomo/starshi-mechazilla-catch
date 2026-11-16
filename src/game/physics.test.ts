@@ -25,7 +25,9 @@ import {
   interpolateRocketState,
   normalizeAngle,
   radToDeg,
+  reconstructRocketStateAtTime,
   stepRocketPhysics,
+  toTelemetryFrame,
 } from './physics';
 import { computeEasyDemoGuidance } from './autopilot';
 import type { ControlInput, RocketState } from './types';
@@ -628,4 +630,62 @@ test('LEO starts at 200km+ with vy=0 retrograde equilibrium and plasma triggers 
   assert.equal(computeReentryPlasmaIntensity(10_000, 260), 0);
   assert.ok(computeReentryPlasmaIntensity(90_000, 1_850) > 0.03);
   assert.ok(computeReentryPlasmaIntensity(50_000, 1_800) > 0.7);
+});
+
+test('reconstructRocketStateAtTime accurately restores keyframes and interpolates intermediate timestamps', () => {
+  const stage = STAGES[0];
+  const emptyFallback = reconstructRocketStateAtTime([], 5, stage, 'assisted');
+  const expectedInitial = createInitialRocketState(stage, 'assisted');
+  assert.equal(emptyFallback.x, expectedInitial.x);
+  assert.equal(emptyFallback.y, expectedInitial.y);
+  assert.equal(emptyFallback.fuelMass, expectedInitial.fuelMass);
+
+  // Record a short powered + coasting trajectory
+  const states: RocketState[] = [];
+  const frames = [];
+  let s = createInitialRocketState(stage, 'realistic');
+  s.selectedEngines = 2;
+  states.push(s);
+  frames.push(toTelemetryFrame(s, stage, 'realistic'));
+
+  for (let step = 1; step <= 12; step++) {
+    const input: ControlInput =
+      step <= 6
+        ? { gimbalLeft: true, gimbalRight: false, throttleHold: true }
+        : { gimbalLeft: false, gimbalRight: true, throttleHold: false };
+    s = stepRocketPhysics(s, input, FIXED_DT);
+    if (step % 6 === 0) {
+      states.push(s);
+      frames.push(toTelemetryFrame(s, stage, 'realistic'));
+    }
+  }
+
+  // Exact keyframe check (index 1, powered segment)
+  const f1 = frames[1];
+  const s1 = states[1];
+  const recon1 = reconstructRocketStateAtTime(frames, f1.time, stage, 'realistic');
+  assert.ok(Math.abs(recon1.x - s1.x) < 1e-6);
+  assert.ok(Math.abs(recon1.y - s1.y) < 1e-6);
+  assert.ok(Math.abs(recon1.vx - s1.vx) < 1e-6);
+  assert.ok(Math.abs(recon1.vy - s1.vy) < 1e-6);
+  assert.ok(Math.abs(recon1.theta - s1.theta) < 1e-6);
+  assert.equal(recon1.activeEngines, 2);
+  assert.equal(recon1.selectedEngines, 2);
+  assert.equal(recon1.throttleOn, true);
+
+  // Midpoint interpolation between frame 0 and frame 1
+  const midTime = (frames[0].time + frames[1].time) / 2;
+  const reconMid = reconstructRocketStateAtTime(frames, midTime, stage, 'realistic');
+  const pinMid = getCatchPinPosition(reconMid);
+  assert.ok(Math.abs(pinMid.x - (frames[0].horizontalPos + frames[1].horizontalPos) / 2) < 1e-6);
+  assert.ok(Math.abs(pinMid.y - (frames[0].altitude + frames[1].altitude) / 2) < 1e-6);
+  assert.ok(Math.abs(reconMid.fuelMass - (frames[0].fuelMass + frames[1].fuelMass) / 2) < 1e-6);
+  assert.equal(reconMid.activeEngines, frames[0].activeEngines);
+
+  // Clamping past end matches last frame
+  const reconEnd = reconstructRocketStateAtTime(frames, 999, stage, 'realistic');
+  const lastFrame = frames[frames.length - 1];
+  assert.equal(reconEnd.time, lastFrame.time);
+  assert.equal(reconEnd.activeEngines, lastFrame.activeEngines);
+  assert.equal(reconEnd.throttleOn, false);
 });

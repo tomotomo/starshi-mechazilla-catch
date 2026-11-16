@@ -303,6 +303,7 @@ export interface TranslationDict {
     watchDemoAgain: string;
     tryYourself: string;
     retryMission: string;
+    replayFlight: string;
     series: {
       altitude: string;
       velY: string;
@@ -311,6 +312,16 @@ export interface TranslationDict {
       activeEngines: string;
       gForce: string;
     };
+  };
+  replay: {
+    badge: string;
+    play: string;
+    pause: string;
+    restart: string;
+    seekAria: string;
+    speedLabel: string;
+    backToResult: string;
+    shortcutHint: string;
   };
   canvas: {
     burnNow: (stopM: number) => string;
@@ -444,6 +455,7 @@ export const TRANSLATIONS: Record<Locale, TranslationDict> = {
       watchDemoAgain: 'もう一度お手本を見る',
       tryYourself: '自分で挑戦する',
       retryMission: '再挑戦する',
+      replayFlight: 'フライトをリプレイ',
       series: {
         altitude: '高度 (Pin Y)',
         velY: '垂直速度 Vy',
@@ -452,6 +464,16 @@ export const TRANSLATIONS: Record<Locale, TranslationDict> = {
         activeEngines: '稼働基数',
         gForce: '加速度',
       },
+    },
+    replay: {
+      badge: 'リプレイ再生中',
+      play: '再生',
+      pause: '一時停止',
+      restart: '最初から',
+      seekAria: 'リプレイ再生位置シークバー',
+      speedLabel: '速度',
+      backToResult: 'リザルトへ戻る',
+      shortcutHint: 'Space 再生/一時停止 · ←/→ シーク · R 最初へ · Esc リザルトへ戻る',
     },
     canvas: {
       burnNow: (stopM) => `今すぐ点火!  [--- ${stopM}m ---]`,
@@ -583,6 +605,7 @@ export const TRANSLATIONS: Record<Locale, TranslationDict> = {
       watchDemoAgain: 'Replay Demo',
       tryYourself: 'Try It Yourself',
       retryMission: 'Retry Mission',
+      replayFlight: 'Replay Flight',
       series: {
         altitude: 'Altitude (Pin Y)',
         velY: 'Vert Vel Vy',
@@ -591,6 +614,16 @@ export const TRANSLATIONS: Record<Locale, TranslationDict> = {
         activeEngines: 'Active Engines',
         gForce: 'G-Force',
       },
+    },
+    replay: {
+      badge: 'FLIGHT REPLAY',
+      play: 'Play',
+      pause: 'Pause',
+      restart: 'Restart',
+      seekAria: 'Replay timeline seek bar',
+      speedLabel: 'Speed',
+      backToResult: 'Back to Results',
+      shortcutHint: 'Space Play/Pause · ←/→ Seek · R Restart · Esc Back to Results',
     },
     canvas: {
       burnNow: (stopM) => `BURN NOW!  [--- ${stopM}m ---]`,

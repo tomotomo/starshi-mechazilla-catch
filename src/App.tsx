@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { DebriefModal } from './components/DebriefModal';
 import { LanguageSettingsModal } from './components/LanguageSettingsModal';
 import { PauseModal } from './components/PauseModal';
+import { ReplayControls } from './components/ReplayControls';
 import { TelemetryHud } from './components/TelemetryHud';
 import { TitleScreen } from './components/TitleScreen';
 import { SoundEngine } from './game/audio';
@@ -23,6 +24,7 @@ import {
   evaluateOutcome,
   getEffectiveInitialFuelKg,
   interpolateRocketState,
+  reconstructRocketStateAtTime,
   stepRocketPhysics,
   toTelemetryFrame,
 } from './game/physics';
@@ -37,6 +39,7 @@ import type {
   GamePhase,
   GameResult,
   OutcomeKind,
+  ReplaySpeedFactor,
   RocketState,
   StageConfig,
   TelemetryFrame,
@@ -135,6 +138,9 @@ export default function App() {
   const [hudDemoGuidance, setHudDemoGuidance] =
     useState<DemoGuidanceOutput | null>(null);
   const [gameResult, setGameResult] = useState<GameResult | null>(null);
+  const [replayTime, setReplayTime] = useState(0);
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState<ReplaySpeedFactor>(1);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -160,6 +166,26 @@ export default function App() {
   localeRef.current = locale;
   const langModalOpenRef = useRef<boolean>(isLanguageModalOpen);
   langModalOpenRef.current = isLanguageModalOpen;
+  const gameResultRef = useRef<GameResult | null>(gameResult);
+  gameResultRef.current = gameResult;
+
+  const replayRef = useRef<{
+    isPlaying: boolean;
+    currentTime: number;
+    duration: number;
+    speed: ReplaySpeedFactor;
+    endTriggered: boolean;
+    lastTimestamp: number;
+    lastUiSyncTimestamp: number;
+  }>({
+    isPlaying: false,
+    currentTime: 0,
+    duration: 0,
+    speed: 1,
+    endTriggered: false,
+    lastTimestamp: 0,
+    lastUiSyncTimestamp: 0,
+  });
 
   const resultTimerRef = useRef<number | null>(null);
   const initialSimRocket = createInitialRocketState(
@@ -268,6 +294,8 @@ export default function App() {
       setAssistMode(targetAssistMode);
       setTimeWarp(1);
       timeWarpRef.current = 1;
+      replayRef.current.isPlaying = false;
+      setReplayPlaying(false);
       setGameResult(null);
       setHudRocket(initialRocket);
       setHudDemoGuidance(initialGuidance);
@@ -358,12 +386,138 @@ export default function App() {
   const handleQuitToTitle = useCallback(() => {
     clearPendingResultTimer();
     clearHeldInputs();
+    replayRef.current.isPlaying = false;
+    setReplayPlaying(false);
     setTimeWarp(1);
     timeWarpRef.current = 1;
     setGameResult(null);
     setPhase('title');
     phaseRef.current = 'title';
   }, [clearHeldInputs, clearPendingResultTimer]);
+
+  const startReplay = useCallback(() => {
+    const res = gameResultRef.current;
+    if (!res || res.telemetry.length === 0) {
+      return;
+    }
+    const firstTime = res.telemetry[0].time;
+    const lastTime = res.telemetry[res.telemetry.length - 1].time;
+    const initialState = reconstructRocketStateAtTime(
+      res.telemetry,
+      firstTime,
+      res.stage,
+      res.assistMode
+    );
+
+    replayRef.current = {
+      isPlaying: true,
+      currentTime: firstTime,
+      duration: lastTime,
+      speed: replayRef.current.speed,
+      endTriggered: false,
+      lastTimestamp: 0,
+      lastUiSyncTimestamp: 0,
+    };
+
+    rendererRef.current?.syncReplaySeek(initialState);
+    soundRef.current?.ensureInit();
+    soundRef.current?.setEngineThrust(0);
+    soundRef.current?.playUiTick(600);
+
+    setReplayTime(firstTime);
+    setReplayPlaying(true);
+    setHudRocket(initialState);
+    setPhase('replay');
+    phaseRef.current = 'replay';
+  }, []);
+
+  const handleSeekReplay = useCallback((timeSec: number) => {
+    const res = gameResultRef.current;
+    if (!res || res.telemetry.length === 0) {
+      return;
+    }
+    const firstTime = res.telemetry[0].time;
+    const lastTime = res.telemetry[res.telemetry.length - 1].time;
+    const clamped = Math.max(firstTime, Math.min(lastTime, timeSec));
+    const atEnd = clamped >= lastTime;
+
+    replayRef.current.currentTime = clamped;
+    replayRef.current.duration = lastTime;
+    replayRef.current.endTriggered = atEnd;
+    replayRef.current.lastTimestamp = 0;
+
+    if (atEnd && replayRef.current.isPlaying) {
+      replayRef.current.isPlaying = false;
+      setReplayPlaying(false);
+    }
+
+    const state = reconstructRocketStateAtTime(
+      res.telemetry,
+      clamped,
+      res.stage,
+      res.assistMode
+    );
+    rendererRef.current?.syncReplaySeek(state);
+    if (atEnd) {
+      if (res.outcome === 'CATCH_SUCCESS') {
+        rendererRef.current?.triggerCatchClamp(state);
+      } else {
+        rendererRef.current?.triggerExplosion(state.x, state.y);
+      }
+    }
+
+    soundRef.current?.setEngineThrust(
+      replayRef.current.isPlaying && !atEnd ? state.activeEngines : 0
+    );
+    setReplayTime(clamped);
+    setHudRocket(state);
+  }, []);
+
+  const handleRestartReplay = useCallback(() => {
+    startReplay();
+  }, [startReplay]);
+
+  const handleToggleReplayPlay = useCallback(() => {
+    const res = gameResultRef.current;
+    if (!res || res.telemetry.length === 0) {
+      return;
+    }
+    const lastTime = res.telemetry[res.telemetry.length - 1].time;
+    if (!replayRef.current.isPlaying && replayRef.current.currentTime >= lastTime - 1e-3) {
+      startReplay();
+      return;
+    }
+
+    const nextPlaying = !replayRef.current.isPlaying;
+    replayRef.current.isPlaying = nextPlaying;
+    replayRef.current.lastTimestamp = 0;
+    if (!nextPlaying) {
+      soundRef.current?.setEngineThrust(0);
+    } else {
+      soundRef.current?.ensureInit();
+    }
+    soundRef.current?.playUiTick(nextPlaying ? 580 : 460);
+    setReplayPlaying(nextPlaying);
+  }, [startReplay]);
+
+  const handleSelectReplaySpeed = useCallback((speed: ReplaySpeedFactor) => {
+    replayRef.current.speed = speed;
+    setReplaySpeed(speed);
+    soundRef.current?.playUiTick(500 + speed * 25);
+  }, []);
+
+  const handleExitReplay = useCallback(() => {
+    replayRef.current.isPlaying = false;
+    setReplayPlaying(false);
+    soundRef.current?.setEngineThrust(0);
+    soundRef.current?.playUiTick(460);
+    rendererRef.current?.syncReplaySeek(simRef.current.rocket);
+    if (simRef.current.outcome === 'CATCH_SUCCESS') {
+      rendererRef.current?.triggerCatchClamp(simRef.current.rocket);
+    }
+    setPhase('gameover');
+    phaseRef.current = 'gameover';
+  }, []);
 
   // Global keyboard bindings & window blur safety
   useEffect(() => {
@@ -388,6 +542,26 @@ export default function App() {
         if (code === 'Enter' || code === 'Space') {
           e.preventDefault();
           startMission();
+        }
+        return;
+      }
+
+      if (phaseRef.current === 'replay') {
+        if (code === 'Escape') {
+          e.preventDefault();
+          handleExitReplay();
+        } else if (code === 'Space') {
+          e.preventDefault();
+          handleToggleReplayPlay();
+        } else if (code === 'ArrowLeft' || code === 'KeyA') {
+          e.preventDefault();
+          handleSeekReplay(replayRef.current.currentTime - 1);
+        } else if (code === 'ArrowRight' || code === 'KeyD') {
+          e.preventDefault();
+          handleSeekReplay(replayRef.current.currentTime + 1);
+        } else if (key === 'r') {
+          e.preventDefault();
+          handleRestartReplay();
         }
         return;
       }
@@ -463,12 +637,14 @@ export default function App() {
     const onBlur = () => {
       clearHeldInputs();
       simRef.current.lastTimestamp = 0;
+      replayRef.current.lastTimestamp = 0;
     };
 
     const onVisibilityChange = () => {
       if (document.hidden) {
         clearHeldInputs();
         simRef.current.lastTimestamp = 0;
+        replayRef.current.lastTimestamp = 0;
       }
     };
 
@@ -485,9 +661,13 @@ export default function App() {
     };
   }, [
     clearHeldInputs,
+    handleExitReplay,
     handlePauseToggle,
+    handleRestartReplay,
+    handleSeekReplay,
     handleSelectEngines,
     handleToggleMute,
+    handleToggleReplayPlay,
     handleToggleWarp,
     startMission,
   ]);
@@ -797,6 +977,76 @@ export default function App() {
           rafId = 0;
         }
         return;
+      } else if (currentPhase === 'replay') {
+        const res = gameResultRef.current;
+        if (!res || res.telemetry.length === 0) {
+          rafId = 0;
+          return;
+        }
+
+        const rp = replayRef.current;
+        if (rp.lastTimestamp === 0) {
+          rp.lastTimestamp = timestamp;
+        }
+        const rawDt = Math.min(0.1, Math.max(0, (timestamp - rp.lastTimestamp) / 1000));
+        rp.lastTimestamp = timestamp;
+
+        if (rp.isPlaying) {
+          rp.currentTime = Math.min(rp.duration, rp.currentTime + rawDt * rp.speed);
+        }
+
+        const replayState = reconstructRocketStateAtTime(
+          res.telemetry,
+          rp.currentTime,
+          res.stage,
+          res.assistMode
+        );
+        const reachedEnd = rp.currentTime >= rp.duration;
+
+        if (reachedEnd && !rp.endTriggered) {
+          rp.endTriggered = true;
+          rp.isPlaying = false;
+          setReplayPlaying(false);
+          setReplayTime(rp.duration);
+          setHudRocket(replayState);
+          sound?.setEngineThrust(0);
+          if (res.outcome === 'CATCH_SUCCESS') {
+            renderer.triggerCatchClamp(replayState);
+            sound?.playCatchSuccess();
+          } else {
+            renderer.triggerExplosion(replayState.x, replayState.y);
+            sound?.playExplosion();
+          }
+        } else if (rp.isPlaying && timestamp - rp.lastUiSyncTimestamp >= 50) {
+          rp.lastUiSyncTimestamp = timestamp;
+          setReplayTime(rp.currentTime);
+          setHudRocket(replayState);
+        }
+
+        if (rp.isPlaying && !reachedEnd) {
+          sound?.setEngineThrust(replayState.activeEngines);
+        } else {
+          sound?.setEngineThrust(0);
+        }
+
+        const replayOutcome = reachedEnd ? res.outcome : null;
+        const effectDt = rp.isPlaying
+          ? rawDt * rp.speed
+          : rp.endTriggered
+            ? rawDt
+            : 0;
+        renderer.updateEffects(replayState, effectDt, replayOutcome);
+        renderer.render(
+          ctx,
+          width,
+          height,
+          replayState,
+          replayOutcome,
+          res.mode === 'demo',
+          res.assistMode,
+          localeRef.current,
+          rp.isPlaying ? rawDt * Math.max(1, rp.speed) : rawDt
+        );
       }
 
       rafId = window.requestAnimationFrame(tick);
@@ -862,26 +1112,57 @@ export default function App() {
         />
       )}
 
-      {(phase === 'playing' || phase === 'paused') && (
+      {(phase === 'playing' || phase === 'paused' || phase === 'replay') && (
         <TelemetryHud
           state={hudRocket}
-          stage={simRef.current.stage}
-          assistMode={simRef.current.assistMode}
-          flightMode={flightMode}
+          stage={phase === 'replay' && gameResult ? gameResult.stage : simRef.current.stage}
+          assistMode={
+            phase === 'replay' && gameResult
+              ? gameResult.assistMode
+              : simRef.current.assistMode
+          }
+          flightMode={
+            phase === 'replay' && gameResult ? gameResult.mode : flightMode
+          }
           locale={locale}
-          demoGuidance={hudDemoGuidance}
-          timeWarp={timeWarp}
+          demoGuidance={phase === 'replay' ? null : hudDemoGuidance}
+          timeWarp={phase === 'replay' ? 1 : timeWarp}
           muted={muted}
+          isReplay={phase === 'replay'}
+          onExitReplay={handleExitReplay}
+          replayControls={
+            phase === 'replay' && gameResult ? (
+              <ReplayControls
+                currentTime={replayTime}
+                duration={
+                  gameResult.telemetry.length > 0
+                    ? gameResult.telemetry[gameResult.telemetry.length - 1].time
+                    : gameResult.flightDuration
+                }
+                isPlaying={replayPlaying}
+                speed={replaySpeed}
+                frames={gameResult.telemetry}
+                locale={locale}
+                onTogglePlay={handleToggleReplayPlay}
+                onSeek={handleSeekReplay}
+                onSelectSpeed={handleSelectReplaySpeed}
+                onRestart={handleRestartReplay}
+                onExitReplay={handleExitReplay}
+              />
+            ) : undefined
+          }
           onSelectEngines={handleSelectEngines}
           onToggleWarp={handleToggleWarp}
           onToggleMute={handleToggleMute}
           onPause={handlePauseToggle}
           onRetry={() =>
-            startMission(
-              simRef.current.stage.id,
-              simRef.current.mode,
-              simRef.current.assistMode
-            )
+            phase === 'replay'
+              ? handleRestartReplay()
+              : startMission(
+                  simRef.current.stage.id,
+                  simRef.current.mode,
+                  simRef.current.assistMode
+                )
           }
         />
       )}
@@ -919,6 +1200,7 @@ export default function App() {
           onPlayManual={() =>
             startMission(gameResult.stage.id, 'manual', assistMode)
           }
+          onStartReplay={startReplay}
           onMissionSelect={handleQuitToTitle}
         />
       )}

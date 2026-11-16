@@ -17,11 +17,13 @@ export interface AssistModeConfig {
   catchMaxOmegaDeg: number;
 }
 
-export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover';
+export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover' | 'replay';
 
 export type EngineCount = 1 | 2 | 3 | 6;
 
 export type TimeWarpFactor = 1 | 5 | 10 | 20;
+
+export type ReplaySpeedFactor = 0.5 | 1 | 2 | 5 | 10;
 
 export interface StageConfig {
   id: DifficultyId;
@@ -77,6 +79,7 @@ export interface TelemetryFrame {
   pitchDeg: number;      // [deg]
   gimbalDeg: number;     // [deg]
   activeEngines: number; // 0, 1, 2, 3, 6
+  selectedEngines?: EngineCount;
   fuelMass: number;      // [kg]
   fuelPct: number;       // [%]
   gForce: number;        // [G]

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, Download, RotateCcw, ArrowLeft, Rocket } from 'lucide-react';
+import { Check, Copy, Download, Play, RotateCcw, ArrowLeft, Rocket } from 'lucide-react';
 import { GROUND_Y, TOWER_TOP_Y, TOWER_X } from '../game/constants';
 import {
   getAssistModeLabel,
@@ -14,6 +14,7 @@ export interface DebriefModalProps {
   locale: Locale;
   onRetry: () => void;
   onPlayManual?: () => void;
+  onStartReplay?: () => void;
   onMissionSelect: () => void;
 }
 
@@ -38,6 +39,7 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
   locale,
   onRetry,
   onPlayManual,
+  onStartReplay,
   onMissionSelect,
 }) => {
   const t = getTranslations(locale);
@@ -762,6 +764,17 @@ export const DebriefModal: React.FC<DebriefModalProps> = ({
               <ArrowLeft className="w-4 h-4" />
               <span>{t.debrief.missionSelect}</span>
             </button>
+            {onStartReplay && frames.length > 0 && (
+              <button
+                type="button"
+                data-testid="debrief-replay-btn"
+                onClick={onStartReplay}
+                className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/60 text-sm font-display font-semibold text-cyan-200 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <Play className="w-4 h-4 fill-current" />
+                <span>{t.debrief.replayFlight}</span>
+              </button>
+            )}
             {isDemo ? (
               <>
                 <button

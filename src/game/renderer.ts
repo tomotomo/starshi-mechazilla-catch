@@ -88,6 +88,14 @@ export class GameCanvasRenderer {
     }
   }
 
+  /**
+   * Clears transient particle/shake/clamp state and resets camera smoothing
+   * so the next render snaps cleanly to the scrubbed replay state.
+   */
+  public syncReplaySeek(state: RocketState): void {
+    this.resetVisuals(state);
+  }
+
   public triggerExplosion(x: number, y: number): void {
     this.shakeTrauma = 1.0;
     for (let i = 0; i < 85; i++) {

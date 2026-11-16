@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pause, RotateCcw, Volume2, VolumeX, FastForward } from 'lucide-react';
+import { ArrowLeft, Pause, RotateCcw, Volume2, VolumeX, FastForward } from 'lucide-react';
 import {
   getAssistModeConfig,
   GROUND_Y,
@@ -37,6 +37,9 @@ export interface TelemetryHudProps {
   demoGuidance: DemoGuidanceOutput | null;
   timeWarp: TimeWarpFactor;
   muted: boolean;
+  isReplay?: boolean;
+  replayControls?: React.ReactNode;
+  onExitReplay?: () => void;
   onSelectEngines: (count: EngineCount) => void;
   onToggleWarp: () => void;
   onToggleMute: () => void;
@@ -64,6 +67,9 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
   demoGuidance,
   timeWarp,
   muted,
+  isReplay = false,
+  replayControls,
+  onExitReplay,
   onSelectEngines,
   onToggleWarp,
   onToggleMute,
@@ -74,6 +80,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
   const stageCopy = getStageLocalized(stage.id, locale);
   const modeLabel = getAssistModeLabel(assistMode, locale);
   const isDemo = flightMode === 'demo';
+  const controlsLocked = isDemo || isReplay;
   const modeCfg = getAssistModeConfig(assistMode);
   const effectiveFuelKg = getEffectiveInitialFuelKg(stage, assistMode);
 
@@ -85,12 +92,12 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
     effectiveFuelKg > 0
       ? Math.max(0, Math.min(100, (state.fuelMass / effectiveFuelKg) * 100))
       : 0;
-  const warpEligible = state.y >= 2_000 && !state.throttleOn;
+  const warpEligible = !isReplay && state.y >= 2_000 && !state.throttleOn;
   const plasmaIntensity = computeReentryPlasmaIntensity(state.y, speed);
   const isOrbitalCoast =
     state.y >= 160_000 && Math.abs(state.vy) < 15 && state.vx >= 1_800;
   const showLeoDeorbitCue =
-    stage.id === 'extreme' && !isDemo && state.y > 100_000;
+    !isReplay && stage.id === 'extreme' && !isDemo && state.y > 100_000;
   const deorbitBurnComplete = state.vx <= LEO_DEORBIT_TARGET_VX + 20;
   const deorbitDvRemaining = Math.max(
     0,
@@ -159,7 +166,11 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
         <div className="pointer-events-auto flex items-center gap-3 bg-[#0B101B]/90 border border-slate-700/60 rounded-lg px-3.5 py-2">
           <div>
             <div className="text-[11px] tracking-wide">
-              {isDemo ? (
+              {isReplay ? (
+                <span data-testid="replay-badge" className="text-amber-300 font-semibold">
+                  {stageCopy.name} · {t.replay.badge}
+                </span>
+              ) : isDemo ? (
                 <span className="text-cyan-300 font-semibold">
                   {stageCopy.name} · {t.hud.demoBadgeSuffix}
                 </span>
@@ -198,18 +209,22 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
           <button
             type="button"
             tabIndex={-1}
-            disabled={!warpEligible && timeWarp === 1}
+            disabled={isReplay || (!warpEligible && timeWarp === 1)}
             onClick={(e) => {
               e.currentTarget.blur();
-              onToggleWarp();
+              if (!isReplay) {
+                onToggleWarp();
+              }
             }}
             title={t.hud.warpTitle}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-mono-tabular font-medium border transition-colors whitespace-nowrap shrink-0 ${
-              timeWarp > 1
-                ? 'bg-amber-500/20 border-amber-400 text-amber-200'
-                : warpEligible
-                  ? 'bg-slate-800/90 border-slate-600 text-slate-200 hover:border-cyan-400'
-                  : 'bg-slate-900/60 border-slate-800 text-slate-500 cursor-not-allowed'
+              isReplay
+                ? 'bg-slate-900/60 border-slate-800 text-slate-500 cursor-not-allowed'
+                : timeWarp > 1
+                  ? 'bg-amber-500/20 border-amber-400 text-amber-200'
+                  : warpEligible
+                    ? 'bg-slate-800/90 border-slate-600 text-slate-200 hover:border-cyan-400'
+                    : 'bg-slate-900/60 border-slate-800 text-slate-500 cursor-not-allowed'
             }`}
           >
             <FastForward className="w-3.5 h-3.5" />
@@ -247,15 +262,19 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
           <button
             type="button"
             tabIndex={-1}
-            aria-label={t.hud.pauseTitle}
+            aria-label={isReplay ? t.replay.backToResult : t.hud.pauseTitle}
             onClick={(e) => {
               e.currentTarget.blur();
-              onPause();
+              if (isReplay) {
+                onExitReplay?.();
+              } else {
+                onPause();
+              }
             }}
             className="w-10 h-10 flex items-center justify-center rounded-lg bg-[#0B101B]/90 border border-slate-700/60 text-slate-200 hover:border-cyan-400 hover:text-cyan-300 transition-colors"
-            title={t.hud.pauseTitle}
+            title={isReplay ? t.replay.backToResult : t.hud.pauseTitle}
           >
-            <Pause className="w-4 h-4" />
+            {isReplay ? <ArrowLeft className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
           </button>
         </div>
       </div>
@@ -399,7 +418,7 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
           </div>
         )}
 
-        {isDemo && demoGuidance && (
+        {!isReplay && isDemo && demoGuidance && (
           <div
             data-testid="demo-hud-strip"
             className="pointer-events-auto w-full max-w-4xl bg-[#0B101B]/94 border border-cyan-500/45 rounded-xl px-4 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
@@ -452,6 +471,8 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
             </div>
           </div>
         )}
+
+        {isReplay && replayControls}
 
         <div className="pointer-events-auto w-full max-w-4xl bg-[#0B101B]/92 border border-slate-700/60 rounded-xl px-4 py-3 grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
           {/* Left: Flight Kinematics (Speed, Alt, G, Max-Q, Hoverslam) */}
@@ -584,17 +605,17 @@ export const TelemetryHud: React.FC<TelemetryHudProps> = ({
                     key={cnt}
                     type="button"
                     tabIndex={-1}
-                    disabled={isDemo}
+                    disabled={controlsLocked}
                     onClick={(e) => {
                       e.currentTarget.blur();
-                      if (!isDemo) {
+                      if (!controlsLocked) {
                         onSelectEngines(cnt);
                       }
                     }}
                     className={`flex-1 py-1 text-xs font-mono-tabular font-semibold rounded border transition-colors ${
                       state.selectedEngines === cnt
                         ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200'
-                        : isDemo
+                        : controlsLocked
                           ? 'bg-slate-900/70 border-slate-800 text-slate-600 cursor-default'
                           : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:text-slate-200'
                     }`}

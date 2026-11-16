@@ -30,6 +30,7 @@ import { formatOutcomeReason, type Locale } from './i18n';
 import type {
   AssistMode,
   ControlInput,
+  EngineCount,
   OutcomeKind,
   RocketState,
   ScoreBreakdown,
@@ -602,9 +603,145 @@ export function toTelemetryFrame(
     pitchDeg: radToDeg(state.theta),
     gimbalDeg: radToDeg(state.gimbal),
     activeEngines: state.activeEngines,
+    selectedEngines: state.selectedEngines,
     fuelMass: state.fuelMass,
     fuelPct: initialFuelKg > 0 ? (state.fuelMass / initialFuelKg) * 100 : 0,
     gForce: state.gForce,
     dynamicPress: state.dynamicPressureKpa,
   };
+}
+
+function coerceActiveEngines(value: number): 0 | 1 | 2 | 3 | 6 {
+  if (value === 1 || value === 2 || value === 3 || value === 6) {
+    return value;
+  }
+  return 0;
+}
+
+function coerceSelectedEngines(
+  selected: EngineCount | undefined,
+  active: 0 | 1 | 2 | 3 | 6
+): EngineCount {
+  if (selected === 1 || selected === 2 || selected === 3 || selected === 6) {
+    return selected;
+  }
+  if (active === 1 || active === 2 || active === 3 || active === 6) {
+    return active;
+  }
+  return 3;
+}
+
+/**
+ * Reconstructs a full RocketState at an arbitrary flight timestamp `timeSec`
+ * by binary-searching and interpolating recorded TelemetryFrame samples.
+ */
+export function reconstructRocketStateAtTime(
+  frames: TelemetryFrame[],
+  timeSec: number,
+  stage: StageConfig,
+  assistMode: AssistMode = 'realistic'
+): RocketState {
+  if (frames.length === 0) {
+    return createInitialRocketState(stage, assistMode);
+  }
+
+  const firstTime = frames[0].time;
+  const lastIndex = frames.length - 1;
+  const lastTime = frames[lastIndex].time;
+  const targetTime = Math.max(firstTime, Math.min(lastTime, timeSec));
+
+  let f0 = frames[0];
+  let f1 = frames[0];
+  let alpha = 0;
+
+  if (frames.length >= 2) {
+    if (targetTime >= lastTime) {
+      f0 = frames[lastIndex - 1];
+      f1 = frames[lastIndex];
+      alpha = 1;
+    } else if (targetTime > firstTime) {
+      let lo = 0;
+      let hi = lastIndex - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (frames[mid].time <= targetTime && targetTime <= frames[mid + 1].time) {
+          lo = mid;
+          break;
+        }
+        if (frames[mid].time < targetTime) {
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      const idx = Math.max(0, Math.min(lastIndex - 1, lo));
+      f0 = frames[idx];
+      f1 = frames[idx + 1];
+      const span = f1.time - f0.time;
+      alpha = span > 1e-6 ? Math.max(0, Math.min(1, (targetTime - f0.time) / span)) : 0;
+    } else {
+      f0 = frames[0];
+      f1 = frames[1];
+      alpha = 0;
+    }
+  }
+
+  const lerp = (a: number, b: number) => a + (b - a) * alpha;
+  const theta0 = degToRad(f0.pitchDeg);
+  const theta1 = degToRad(f1.pitchDeg);
+  const thetaDiff = normalizeAngle(theta1 - theta0);
+  const theta = normalizeAngle(theta0 + thetaDiff * alpha);
+  const dt = f1.time - f0.time;
+  const omega = dt > 1e-6 ? thetaDiff / dt : 0;
+  const gimbal = degToRad(lerp(f0.gimbalDeg, f1.gimbalDeg));
+
+  const pinX = lerp(f0.horizontalPos, f1.horizontalPos);
+  const pinY = lerp(f0.altitude, f1.altitude);
+  const x = pinX - R_CATCH_PIN * Math.sin(theta);
+  const y = pinY - R_CATCH_PIN * Math.cos(theta);
+
+  const vx = lerp(f0.velX, f1.velX);
+  const vy = lerp(f0.velY, f1.velY);
+  const fuelMass = lerp(f0.fuelMass, f1.fuelMass);
+  const gForce = lerp(f0.gForce, f1.gForce);
+  const dynamicPressureKpa = lerp(f0.dynamicPress, f1.dynamicPress);
+
+  const discreteFrame = alpha < 1 ? f0 : f1;
+  const activeEngines = coerceActiveEngines(discreteFrame.activeEngines);
+  const selectedEngines = coerceSelectedEngines(
+    discreteFrame.selectedEngines,
+    activeEngines
+  );
+
+  const state: RocketState = {
+    x,
+    y,
+    vx,
+    vy,
+    theta,
+    omega,
+    gimbal,
+    fuelMass,
+    selectedEngines,
+    throttleOn: activeEngines > 0,
+    activeEngines,
+    time: targetTime,
+    ax: 0,
+    ay: 0,
+    gForce,
+    dynamicPressureKpa,
+    hoverslamStopPinY: null,
+    hoverslamCanStop: true,
+    hoverslamStopPinY3: null,
+    hoverslam3CanStop: true,
+  };
+
+  const predCurrent = estimateHoverslamPrediction(state, selectedEngines);
+  const pred3 = estimateHoverslamPrediction(state, 3);
+  state.hoverslamStopPinY = predCurrent.stopPinY;
+  state.hoverslamCanStop = predCurrent.canStop;
+  state.hoverslamStopPinY3 = pred3.stopPinY;
+  state.hoverslam3CanStop = pred3.canStop;
+
+  return state;
 }
